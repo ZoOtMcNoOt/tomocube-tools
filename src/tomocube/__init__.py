@@ -1,0 +1,68 @@
+"""
+Tomocube Tools - Python library for working with Tomocube TCF files.
+
+This package provides tools for reading, viewing, and processing
+holotomography data from Tomocube microscopes.
+
+Modules:
+    core: File I/O, types, constants, and exceptions
+    processing: FL registration, image normalization, metadata parsing
+    viewer: Interactive visualization tools
+"""
+
+from tomocube.core import (
+    # File I/O
+    TCFFile,
+    TCFFileLoader,
+    # Types
+    RegistrationParams,
+    ViewerState,
+    # Exceptions
+    TCFError,
+    TCFFileError,
+    TCFParseError,
+    TCFNoFluorescenceError,
+)
+from tomocube.processing import (
+    # Registration
+    register_fl_to_ht,
+    # Image processing
+    normalize_image,
+    normalize_with_bounds,
+    compute_overlap_score,
+    # Metadata
+    extract_metadata,
+    parse_ini_string,
+)
+from tomocube.viewer import (
+    TCFViewer,
+    SliceViewer,
+    FluorescenceMapper,
+)
+
+__version__ = "0.1.0"
+
+__all__ = [
+    # Core - File I/O
+    "TCFFile",
+    "TCFFileLoader",
+    # Core - Types
+    "RegistrationParams",
+    "ViewerState",
+    # Core - Exceptions
+    "TCFError",
+    "TCFFileError",
+    "TCFParseError",
+    "TCFNoFluorescenceError",
+    # Processing
+    "register_fl_to_ht",
+    "normalize_image",
+    "normalize_with_bounds",
+    "compute_overlap_score",
+    "extract_metadata",
+    "parse_ini_string",
+    # Viewer
+    "TCFViewer",
+    "SliceViewer",
+    "FluorescenceMapper",
+]

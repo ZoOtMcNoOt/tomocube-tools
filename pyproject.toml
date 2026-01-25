@@ -1,0 +1,26 @@
+[project]
+name = "tomocube-tools"
+version = "0.1.0"
+description = "Tools for working with Tomocube TCF files"
+requires-python = ">=3.10"
+dependencies = [
+    "h5py",
+    "numpy",
+    "scipy",
+    "matplotlib",
+]
+
+[project.optional-dependencies]
+matlab = ["hdf5storage"]
+
+[tool.pyright]
+pythonVersion = "3.10"
+typeCheckingMode = "standard"
+reportMissingTypeStubs = false
+
+
+# h5py Dataset/Group assignment issues - stub limitations
+reportAssignmentType = "warning"
+
+# Optional import for hdf5storage (used when available)
+reportMissingImports = "warning"
