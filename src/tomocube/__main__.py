@@ -23,36 +23,37 @@ def main() -> int:
         return 1
 
     command = sys.argv[1].lower()
-    args = sys.argv[2:]
+    # Join remaining args to handle paths with spaces
+    file_path = " ".join(sys.argv[2:]) if len(sys.argv) > 2 else ""
 
     if command == "view":
         from tomocube.viewer import TCFViewer
-        if not args:
+        if not file_path:
             # Try to find a file automatically
             from tomocube.viewer.tcf_viewer import main as viewer_main
             viewer_main()
             return 0
-        with TCFViewer(args[0]) as viewer:
+        with TCFViewer(file_path) as viewer:
             viewer.show()
         return 0
 
     elif command == "slice":
         from tomocube.viewer import SliceViewer
-        if not args:
+        if not file_path:
             # Try to find a file automatically
             from tomocube.viewer.slice_viewer import main as slice_main
             slice_main()
             return 0
-        viewer = SliceViewer(args[0])
+        viewer = SliceViewer(file_path)
         viewer.show()
         return 0
 
     elif command == "info":
         from tomocube.core import TCFFile
-        if not args:
+        if not file_path:
             print("Usage: python -m tomocube info <file.TCF>")
             return 1
-        tcf_path = Path(args[0])
+        tcf_path = Path(file_path)
         with h5py.File(tcf_path, "r") as f:
             info = TCFFile.from_hdf5(f)
         print(f"File: {tcf_path.name}")
