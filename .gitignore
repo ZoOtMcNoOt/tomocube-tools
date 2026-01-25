@@ -3,3 +3,4 @@
 
 *.pyc
 .claude/
+tomocube_tools.egg-info/
