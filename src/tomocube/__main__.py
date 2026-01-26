@@ -11,167 +11,207 @@ from pathlib import Path
 
 import h5py
 
-# ANSI color codes for terminal output
-class Colors:
+
+class Style:
+    """Terminal styling with ANSI codes."""
+
+    # Text styles
     BOLD = "\033[1m"
     DIM = "\033[2m"
-    CYAN = "\033[36m"
+    ITALIC = "\033[3m"
+    UNDERLINE = "\033[4m"
+
+    # Colors
+    BLACK = "\033[30m"
+    RED = "\033[31m"
     GREEN = "\033[32m"
     YELLOW = "\033[33m"
     BLUE = "\033[34m"
     MAGENTA = "\033[35m"
-    RED = "\033[31m"
+    CYAN = "\033[36m"
+    WHITE = "\033[37m"
+
+    # Bright colors
+    BRIGHT_BLACK = "\033[90m"
+    BRIGHT_RED = "\033[91m"
+    BRIGHT_GREEN = "\033[92m"
+    BRIGHT_YELLOW = "\033[93m"
+    BRIGHT_BLUE = "\033[94m"
+    BRIGHT_MAGENTA = "\033[95m"
+    BRIGHT_CYAN = "\033[96m"
+    BRIGHT_WHITE = "\033[97m"
+
+    # Background
+    BG_BLACK = "\033[40m"
+    BG_BLUE = "\033[44m"
+    BG_CYAN = "\033[46m"
+
     RESET = "\033[0m"
 
     @classmethod
     def disable(cls) -> None:
-        """Disable colors (for non-TTY output)."""
-        cls.BOLD = cls.DIM = cls.CYAN = cls.GREEN = ""
-        cls.YELLOW = cls.BLUE = cls.MAGENTA = cls.RED = cls.RESET = ""
+        """Disable all styling."""
+        for attr in dir(cls):
+            if attr.isupper() and not attr.startswith("_"):
+                setattr(cls, attr, "")
 
 
-# Disable colors if not a TTY
+# Disable colors if not a TTY or on Windows without ANSI support
 if not sys.stdout.isatty():
-    Colors.disable()
+    Style.disable()
 
 
-def _print_banner() -> None:
-    """Print the CLI banner."""
-    c = Colors
-    print(f"""
-{c.CYAN}{c.BOLD}  +--------------------------------------------+
-  |           TOMOCUBE TOOLS v0.1.0            |
-  |     Holotomography Data Processing CLI     |
-  +--------------------------------------------+{c.RESET}
-""")
+def _styled(text: str, *styles: str) -> str:
+    """Apply multiple styles to text."""
+    return "".join(styles) + text + Style.RESET
+
+
+def _print_logo() -> None:
+    """Print the Tomocube Tools logo."""
+    s = Style
+    print()
+    print(f"  {s.BRIGHT_CYAN}{s.BOLD}TOMOCUBE{s.RESET} {s.DIM}Tools{s.RESET} {s.BRIGHT_BLACK}v0.1.0{s.RESET}")
+    print(f"  {s.BRIGHT_BLACK}Holotomography data processing{s.RESET}")
+    print()
 
 
 def _print_help() -> None:
     """Print comprehensive help information."""
-    c = Colors
-    _print_banner()
+    s = Style
 
-    print(f"""{c.BOLD}USAGE{c.RESET}
-    python -m tomocube {c.CYAN}<command>{c.RESET} {c.DIM}[options]{c.RESET}
+    _print_logo()
 
-{c.BOLD}COMMANDS{c.RESET}
+    # Usage
+    print(f"  {s.BOLD}Usage:{s.RESET} python -m tomocube {s.CYAN}<command>{s.RESET} {s.DIM}[options]{s.RESET}")
+    print()
 
-  {c.GREEN}Visualization{c.RESET}
-    {c.CYAN}view{c.RESET}   <file.TCF>              Interactive 3D viewer with FL overlay
-    {c.CYAN}slice{c.RESET}  <file.TCF>              Side-by-side HT/FL comparison
+    # Commands section
+    print(f"  {s.BOLD}Commands{s.RESET}")
+    print()
 
-  {c.GREEN}Information{c.RESET}
-    {c.CYAN}info{c.RESET}   <file.TCF>              Display file metadata and structure
-    {c.CYAN}help{c.RESET}                           Show this help message
+    # Visualization
+    print(f"    {s.BRIGHT_BLACK}Visualization{s.RESET}")
+    print(f"      {s.CYAN}view{s.RESET}  {s.DIM}<file>{s.RESET}    Interactive 3D viewer with orthogonal slices")
+    print(f"      {s.CYAN}slice{s.RESET} {s.DIM}<file>{s.RESET}    Side-by-side HT/FL comparison viewer")
+    print()
 
-  {c.GREEN}Export{c.RESET}
-    {c.CYAN}tiff{c.RESET}   <file.TCF> [output]     Export to multi-page TIFF stack
-    {c.CYAN}mat{c.RESET}    <file.TCF> [output]     Export to MATLAB .mat format
-    {c.CYAN}gif{c.RESET}    <file.TCF> [output]     Create animated GIF
+    # Information
+    print(f"    {s.BRIGHT_BLACK}Information{s.RESET}")
+    print(f"      {s.CYAN}info{s.RESET}  {s.DIM}<file>{s.RESET}    Display file metadata and structure")
+    print(f"      {s.CYAN}help{s.RESET}            Show this help message")
+    print()
 
-{c.BOLD}EXPORT OPTIONS{c.RESET}
+    # Export
+    print(f"    {s.BRIGHT_BLACK}Export{s.RESET}")
+    print(f"      {s.CYAN}tiff{s.RESET}  {s.DIM}<file>{s.RESET}    Export to multi-page TIFF stack")
+    print(f"      {s.CYAN}mat{s.RESET}   {s.DIM}<file>{s.RESET}    Export to MATLAB .mat format")
+    print(f"      {s.CYAN}gif{s.RESET}   {s.DIM}<file>{s.RESET}    Create animated GIF")
+    print()
 
-  {c.YELLOW}tiff{c.RESET} options:
-    --fl <channel>    Export fluorescence channel (e.g., CH0) instead of HT
-    --16bit           16-bit output {c.DIM}(default){c.RESET}
-    --32bit           32-bit float output
+    # Options
+    print(f"  {s.BOLD}Export Options{s.RESET}")
+    print()
+    print(f"    {s.YELLOW}tiff{s.RESET}")
+    print(f"      {s.DIM}--fl <CH>{s.RESET}       Export fluorescence channel instead of HT")
+    print(f"      {s.DIM}--16bit{s.RESET}         16-bit output {s.BRIGHT_BLACK}(default){s.RESET}")
+    print(f"      {s.DIM}--32bit{s.RESET}         32-bit float output")
+    print()
+    print(f"    {s.YELLOW}mat{s.RESET}")
+    print(f"      {s.DIM}--no-fl{s.RESET}         Exclude fluorescence data")
+    print()
+    print(f"    {s.YELLOW}gif{s.RESET}")
+    print(f"      {s.DIM}--overlay{s.RESET}       HT+FL overlay animation")
+    print(f"      {s.DIM}--fps <N>{s.RESET}       Frame rate {s.BRIGHT_BLACK}(default: 10){s.RESET}")
+    print(f"      {s.DIM}--axis <z|y|x>{s.RESET}  Slice axis {s.BRIGHT_BLACK}(default: z){s.RESET}")
+    print()
 
-  {c.YELLOW}mat{c.RESET} options:
-    --no-fl           Exclude fluorescence data from export
+    # Keyboard shortcuts
+    print(f"  {s.BOLD}Viewer Shortcuts{s.RESET}")
+    print()
+    _print_shortcut_row([
+        ("Up/Down", "Navigate Z"),
+        ("A", "Auto contrast"),
+        ("D", "Distance"),
+        ("S", "Save PNG"),
+    ])
+    _print_shortcut_row([
+        ("Scroll", "Navigate Z"),
+        ("G", "Global contrast"),
+        ("P", "Polygon area"),
+        ("M", "Save MIP"),
+    ])
+    _print_shortcut_row([
+        ("Click", "Select pos"),
+        ("I", "Invert cmap"),
+        ("C", "Clear meas"),
+        ("F", "Toggle FL"),
+    ])
+    _print_shortcut_row([
+        ("1-6", "Colormap"),
+        ("R", "Reset view"),
+        ("Q", "Quit"),
+        ("", ""),
+    ])
+    print()
 
-  {c.YELLOW}gif{c.RESET} options:
-    --overlay         Create HT+FL overlay animation
-    --fps <N>         Frame rate {c.DIM}(default: 10){c.RESET}
-    --axis <z|y|x>    Slice axis for animation {c.DIM}(default: z){c.RESET}
-
-{c.BOLD}VIEWER KEYBOARD SHORTCUTS{c.RESET}
-
-  {c.GREEN}Navigation{c.RESET}
-    Up/Down, Scroll   Navigate Z-slices
-    Home/End          Jump to first/last slice
-    Click             Select position in any view
-
-  {c.GREEN}Display{c.RESET}
-    A                 Auto-contrast (current slice)
-    G                 Auto-contrast (global)
-    R                 Reset view
-    I                 Invert colormap
-    1-6               Switch colormap
-    F                 Toggle fluorescence overlay
-
-  {c.GREEN}Measurement{c.RESET}
-    D                 Distance measurement mode
-    P                 Polygon/area measurement mode
-    C                 Clear all measurements
-
-  {c.GREEN}Export{c.RESET}
-    S                 Save current slice as PNG
-    M                 Save MIP as PNG
-
-  {c.GREEN}Exit{c.RESET}
-    Q, Escape         Quit viewer
-
-{c.BOLD}EXAMPLES{c.RESET}
-
-  {c.DIM}# View a TCF file interactively{c.RESET}
-  python -m tomocube view "path/to/sample.TCF"
-
-  {c.DIM}# Show file information{c.RESET}
-  python -m tomocube info "path/to/sample.TCF"
-
-  {c.DIM}# Export HT data to TIFF{c.RESET}
-  python -m tomocube tiff "sample.TCF" output.tiff
-
-  {c.DIM}# Export FL channel to 32-bit TIFF{c.RESET}
-  python -m tomocube tiff "sample.TCF" fl.tiff --fl CH0 --32bit
-
-  {c.DIM}# Create Z-stack animation{c.RESET}
-  python -m tomocube gif "sample.TCF" animation.gif --fps 15
-
-  {c.DIM}# Create HT+FL overlay animation{c.RESET}
-  python -m tomocube gif "sample.TCF" overlay.gif --overlay
-
-{c.BOLD}MORE INFORMATION{c.RESET}
-
-  Documentation:  See README.md
-  Data format:    See DATA_ANALYSIS.md
-""")
+    # Examples
+    print(f"  {s.BOLD}Examples{s.RESET}")
+    print()
+    print(f"    {s.BRIGHT_BLACK}# View a TCF file{s.RESET}")
+    print(f"    {s.DIM}${s.RESET} python -m tomocube view sample.TCF")
+    print()
+    print(f"    {s.BRIGHT_BLACK}# Export to TIFF{s.RESET}")
+    print(f"    {s.DIM}${s.RESET} python -m tomocube tiff sample.TCF --32bit")
+    print()
+    print(f"    {s.BRIGHT_BLACK}# Create overlay animation{s.RESET}")
+    print(f"    {s.DIM}${s.RESET} python -m tomocube gif sample.TCF --overlay --fps 15")
+    print()
 
 
-def _print_short_help() -> None:
-    """Print short help when no command given."""
-    c = Colors
-    _print_banner()
+def _print_shortcut_row(shortcuts: list[tuple[str, str]]) -> None:
+    """Print a row of keyboard shortcuts."""
+    s = Style
+    parts = []
+    for key, desc in shortcuts:
+        if key:
+            parts.append(f"{s.CYAN}{key:12}{s.RESET}{s.DIM}{desc:14}{s.RESET}")
+        else:
+            parts.append(" " * 26)
+    print(f"    {''.join(parts)}")
 
-    print(f"""{c.BOLD}USAGE{c.RESET}
-    python -m tomocube {c.CYAN}<command>{c.RESET} {c.DIM}[options]{c.RESET}
 
-{c.BOLD}COMMANDS{c.RESET}
-    {c.CYAN}view{c.RESET}    Interactive 3D viewer         {c.CYAN}info{c.RESET}    Show file metadata
-    {c.CYAN}slice{c.RESET}   HT/FL comparison viewer       {c.CYAN}help{c.RESET}    Full help & examples
-    {c.CYAN}tiff{c.RESET}    Export to TIFF stack          {c.CYAN}mat{c.RESET}     Export to MATLAB
-    {c.CYAN}gif{c.RESET}     Create animated GIF
+def _print_short_usage() -> None:
+    """Print short usage when no command given."""
+    s = Style
+    _print_logo()
 
-{c.DIM}Run 'python -m tomocube help' for detailed usage and examples.{c.RESET}
-""")
+    print(f"  {s.BOLD}Usage:{s.RESET} python -m tomocube {s.CYAN}<command>{s.RESET} {s.DIM}[options]{s.RESET}")
+    print()
+    print(f"  {s.BOLD}Commands{s.RESET}")
+    print(f"    {s.CYAN}view{s.RESET}   Interactive 3D viewer      {s.CYAN}tiff{s.RESET}   Export TIFF stack")
+    print(f"    {s.CYAN}slice{s.RESET}  HT/FL comparison           {s.CYAN}mat{s.RESET}    Export MATLAB .mat")
+    print(f"    {s.CYAN}info{s.RESET}   Show file metadata         {s.CYAN}gif{s.RESET}    Create animation")
+    print()
+    print(f"  {s.DIM}Run{s.RESET} python -m tomocube help {s.DIM}for detailed usage{s.RESET}")
+    print()
 
 
 def _print_info(file_path: str) -> int:
     """Print formatted file information."""
     from tomocube.core import TCFFile
 
-    c = Colors
+    s = Style
     tcf_path = Path(file_path)
 
     if not tcf_path.exists():
-        print(f"{c.RED}Error:{c.RESET} File not found: {file_path}")
+        _print_error(f"File not found: {file_path}")
         return 1
 
     try:
         with h5py.File(tcf_path, "r") as f:
             info = TCFFile.from_hdf5(f)
     except Exception as e:
-        print(f"{c.RED}Error:{c.RESET} Could not read file: {e}")
+        _print_error(f"Could not read file: {e}")
         return 1
 
     # Calculate physical dimensions
@@ -181,78 +221,94 @@ def _print_info(file_path: str) -> int:
     fov_y = ht_y * res_y
     fov_z = ht_z * res_z
 
-    print(f"""
-{c.CYAN}{c.BOLD}+--------------------------------------------------------------+
-|  TCF FILE INFORMATION                                        |
-+--------------------------------------------------------------+{c.RESET}
+    print()
+    print(f"  {s.BRIGHT_CYAN}{s.BOLD}TCF File Info{s.RESET}")
+    print(f"  {s.BRIGHT_BLACK}{'=' * 50}{s.RESET}")
+    print()
 
-{c.BOLD}File{c.RESET}
-    Name:           {c.GREEN}{tcf_path.name}{c.RESET}
-    Path:           {c.DIM}{tcf_path.parent}{c.RESET}
+    # File
+    print(f"  {s.BOLD}File{s.RESET}")
+    print(f"    {s.DIM}Name{s.RESET}         {s.GREEN}{tcf_path.name}{s.RESET}")
+    print(f"    {s.DIM}Location{s.RESET}     {s.BRIGHT_BLACK}{tcf_path.parent}{s.RESET}")
+    print()
 
-{c.BOLD}Holotomography (HT){c.RESET}
-    Shape:          {c.YELLOW}{ht_z}{c.RESET} x {c.YELLOW}{ht_y}{c.RESET} x {c.YELLOW}{ht_x}{c.RESET} {c.DIM}(Z x Y x X){c.RESET}
-    Resolution:     {res_x:.3f} x {res_y:.3f} x {res_z:.3f} um/px {c.DIM}(X x Y x Z){c.RESET}
-    Field of View:  {fov_x:.1f} x {fov_y:.1f} x {fov_z:.1f} um""")
-
+    # Holotomography
+    print(f"  {s.BOLD}Holotomography{s.RESET}")
+    print(f"    {s.DIM}Volume{s.RESET}       {s.YELLOW}{ht_z}{s.RESET} x {s.YELLOW}{ht_y}{s.RESET} x {s.YELLOW}{ht_x}{s.RESET} {s.BRIGHT_BLACK}(Z x Y x X){s.RESET}")
+    print(f"    {s.DIM}Resolution{s.RESET}   {res_x:.3f} x {res_y:.3f} x {res_z:.3f} {s.BRIGHT_BLACK}um/px{s.RESET}")
+    print(f"    {s.DIM}FOV{s.RESET}          {fov_x:.1f} x {fov_y:.1f} x {fov_z:.1f} {s.BRIGHT_BLACK}um{s.RESET}")
     if info.ri_min is not None and info.ri_max is not None:
-        print(f"    RI Range:       {c.CYAN}{info.ri_min:.4f}{c.RESET} - {c.CYAN}{info.ri_max:.4f}{c.RESET}")
+        print(f"    {s.DIM}RI Range{s.RESET}     {s.CYAN}{info.ri_min:.4f}{s.RESET} - {s.CYAN}{info.ri_max:.4f}{s.RESET}")
+    print()
 
-    print(f"""
-{c.BOLD}Optics{c.RESET}
-    Magnification:  {c.YELLOW}{info.magnification or '?'}x{c.RESET}
-    NA:             {info.numerical_aperture or '?'}
-    Medium RI:      {info.medium_ri or '?'}
+    # Optics
+    print(f"  {s.BOLD}Optics{s.RESET}")
+    print(f"    {s.DIM}Magnification{s.RESET}  {s.YELLOW}{info.magnification or '?'}x{s.RESET}")
+    print(f"    {s.DIM}NA{s.RESET}             {info.numerical_aperture or '?'}")
+    print(f"    {s.DIM}Medium RI{s.RESET}      {info.medium_ri or '?'}")
+    print()
 
-{c.BOLD}Acquisition{c.RESET}
-    Timepoints:     {len(info.timepoints)}""")
+    # Acquisition
+    print(f"  {s.BOLD}Acquisition{s.RESET}")
+    print(f"    {s.DIM}Timepoints{s.RESET}   {len(info.timepoints)}")
+    print()
 
+    # Fluorescence
     if info.has_fluorescence:
-        print(f"""
-{c.BOLD}Fluorescence (FL){c.RESET}  {c.GREEN}Available{c.RESET}
-    Channels:       {', '.join(info.fl_channels)}""")
+        print(f"  {s.BOLD}Fluorescence{s.RESET}  {s.GREEN}Available{s.RESET}")
+        print(f"    {s.DIM}Channels{s.RESET}     {', '.join(info.fl_channels)}")
         for ch, shape in info.fl_shapes.items():
             fl_z, fl_y, fl_x = shape
-            fl_res = info.fl_resolution
-            fl_fov_x = fl_x * fl_res[2]
-            fl_fov_y = fl_y * fl_res[1]
-            fl_fov_z = fl_z * fl_res[0]
-            print(f"    {ch} Shape:       {fl_z} x {fl_y} x {fl_x} {c.DIM}(Z x Y x X){c.RESET}")
-            print(f"    {ch} FOV:         {fl_fov_x:.1f} x {fl_fov_y:.1f} x {fl_fov_z:.1f} um")
-        print(f"    Resolution:     {fl_res[2]:.3f} x {fl_res[1]:.3f} x {fl_res[0]:.3f} um/px {c.DIM}(X x Y x Z){c.RESET}")
+            print(f"    {s.DIM}{ch} Volume{s.RESET}   {fl_z} x {fl_y} x {fl_x}")
+        fl_res = info.fl_resolution
+        print(f"    {s.DIM}Resolution{s.RESET}   {fl_res[2]:.3f} x {fl_res[1]:.3f} x {fl_res[0]:.3f} {s.BRIGHT_BLACK}um/px{s.RESET}")
     else:
-        print(f"""
-{c.BOLD}Fluorescence (FL){c.RESET}  {c.DIM}Not available{c.RESET}""")
+        print(f"  {s.BOLD}Fluorescence{s.RESET}  {s.BRIGHT_BLACK}Not available{s.RESET}")
 
     print()
     return 0
 
 
-def _print_progress(message: str, done: bool = False) -> None:
-    """Print a progress message."""
-    c = Colors
-    if done:
-        print(f"  {c.GREEN}[OK]{c.RESET} {message}")
-    else:
-        print(f"  {c.YELLOW}>>>{c.RESET} {message}")
-
-
 def _print_error(message: str) -> None:
     """Print an error message."""
-    c = Colors
-    print(f"\n{c.RED}Error:{c.RESET} {message}\n")
+    s = Style
+    print()
+    print(f"  {s.RED}{s.BOLD}Error{s.RESET} {message}")
+    print()
 
 
-def _print_success(message: str) -> None:
+def _print_success(path: str) -> None:
     """Print a success message."""
-    c = Colors
-    print(f"\n{c.GREEN}SUCCESS:{c.RESET} {message}\n")
+    s = Style
+    print(f"  {s.GREEN}{s.BOLD}Saved{s.RESET} {path}")
+    print()
+
+
+def _print_step(message: str, status: str = "working") -> None:
+    """Print a step in a process."""
+    s = Style
+    if status == "working":
+        print(f"  {s.YELLOW}>{s.RESET} {message}")
+    elif status == "done":
+        print(f"  {s.GREEN}>{s.RESET} {message}")
+    elif status == "info":
+        print(f"  {s.BRIGHT_BLACK}>{s.RESET} {s.DIM}{message}{s.RESET}")
+
+
+def _print_export_header(title: str, input_file: str) -> None:
+    """Print export operation header."""
+    s = Style
+    print()
+    print(f"  {s.BRIGHT_CYAN}{s.BOLD}{title}{s.RESET}")
+    print(f"  {s.BRIGHT_BLACK}{'=' * 50}{s.RESET}")
+    print()
+    _print_step(f"Input: {Path(input_file).name}", "info")
 
 
 def main() -> int:
     """Main CLI entry point."""
     if len(sys.argv) < 2:
-        _print_short_help()
+        _print_short_usage()
         return 1
 
     command = sys.argv[1].lower()
@@ -264,7 +320,8 @@ def main() -> int:
 
     # Version command
     if command in ("version", "-v", "--version"):
-        print("tomocube-tools v0.1.0")
+        s = Style
+        print(f"{s.BRIGHT_CYAN}tomocube-tools{s.RESET} {s.DIM}v0.1.0{s.RESET}")
         return 0
 
     # Join remaining args to handle paths with spaces
@@ -297,7 +354,8 @@ def main() -> int:
     elif command == "info":
         if not file_path:
             _print_error("Missing file path")
-            print("Usage: python -m tomocube info <file.TCF>")
+            print("  Usage: python -m tomocube info <file.TCF>")
+            print()
             return 1
         return _print_info(file_path)
 
@@ -312,8 +370,36 @@ def main() -> int:
 
     else:
         _print_error(f"Unknown command: {command}")
-        _print_short_help()
+        _print_short_usage()
         return 1
+
+
+def _print_subcommand_help(name: str, usage: str, options: list[tuple[str, str, str]], examples: list[tuple[str, str]]) -> None:
+    """Print help for a subcommand."""
+    s = Style
+    print()
+    print(f"  {s.BRIGHT_CYAN}{s.BOLD}{name}{s.RESET}")
+    print()
+    print(f"  {s.BOLD}Usage{s.RESET}")
+    print(f"    {s.DIM}${s.RESET} {usage}")
+    print()
+
+    if options:
+        print(f"  {s.BOLD}Options{s.RESET}")
+        for opt, arg, desc in options:
+            if arg:
+                print(f"    {s.CYAN}{opt}{s.RESET} {s.DIM}{arg}{s.RESET}")
+                print(f"        {desc}")
+            else:
+                print(f"    {s.CYAN}{opt}{s.RESET}    {desc}")
+        print()
+
+    if examples:
+        print(f"  {s.BOLD}Examples{s.RESET}")
+        for comment, cmd in examples:
+            print(f"    {s.BRIGHT_BLACK}# {comment}{s.RESET}")
+            print(f"    {s.DIM}${s.RESET} {cmd}")
+            print()
 
 
 def _convert_tiff(args: str) -> int:
@@ -321,26 +407,23 @@ def _convert_tiff(args: str) -> int:
     from tomocube.core.file import TCFFileLoader
     from tomocube.processing.export import export_to_tiff
 
-    c = Colors
     parts = args.split() if args else []
 
     if not parts:
-        print(f"""
-{c.BOLD}TIFF Export{c.RESET}
-
-{c.BOLD}Usage:{c.RESET}
-    python -m tomocube tiff <file.TCF> [output.tiff] [options]
-
-{c.BOLD}Options:{c.RESET}
-    --fl <channel>    Export fluorescence channel (e.g., CH0)
-    --16bit           16-bit unsigned integer output {c.DIM}(default){c.RESET}
-    --32bit           32-bit float output
-
-{c.BOLD}Examples:{c.RESET}
-    python -m tomocube tiff sample.TCF
-    python -m tomocube tiff sample.TCF output.tiff --32bit
-    python -m tomocube tiff sample.TCF fl_stack.tiff --fl CH0
-""")
+        _print_subcommand_help(
+            "TIFF Export",
+            "python -m tomocube tiff <file.TCF> [output.tiff] [options]",
+            [
+                ("--fl", "<channel>", "Export fluorescence channel (e.g., CH0)"),
+                ("--16bit", "", "16-bit unsigned integer output (default)"),
+                ("--32bit", "", "32-bit float output"),
+            ],
+            [
+                ("Export HT data", "python -m tomocube tiff sample.TCF"),
+                ("Export as 32-bit", "python -m tomocube tiff sample.TCF output.tiff --32bit"),
+                ("Export FL channel", "python -m tomocube tiff sample.TCF fl.tiff --fl CH0"),
+            ],
+        )
         return 1
 
     tcf_path = parts[0]
@@ -372,19 +455,19 @@ def _convert_tiff(args: str) -> int:
         _print_error(f"File not found: {tcf_path}")
         return 1
 
-    print(f"\n{c.BOLD}Exporting to TIFF{c.RESET}")
-    _print_progress(f"Input: {tcf_path}")
-    _print_progress(f"Channel: {channel}")
-    _print_progress(f"Bit depth: {bit_depth}")
-    _print_progress("Loading data...")
+    _print_export_header("TIFF Export", tcf_path)
+    _print_step(f"Channel: {channel}", "info")
+    _print_step(f"Bit depth: {bit_depth}", "info")
+    print()
+    _print_step("Loading data...")
 
     try:
         with TCFFileLoader(tcf_path) as loader:
             loader.load_timepoint(0)
-            _print_progress("Converting...", done=True)
+            _print_step("Converting to TIFF...", "done")
             result = export_to_tiff(loader, output_path, channel=channel, bit_depth=bit_depth)
 
-        _print_success(f"Saved: {result}")
+        _print_success(str(result))
         return 0
     except Exception as e:
         _print_error(str(e))
@@ -396,32 +479,27 @@ def _convert_mat(args: str) -> int:
     from tomocube.core.file import TCFFileLoader
     from tomocube.processing.export import export_to_mat
 
-    c = Colors
+    s = Style
     parts = args.split() if args else []
 
     if not parts:
-        print(f"""
-{c.BOLD}MATLAB Export{c.RESET}
-
-{c.BOLD}Usage:{c.RESET}
-    python -m tomocube mat <file.TCF> [output.mat] [options]
-
-{c.BOLD}Options:{c.RESET}
-    --no-fl           Exclude fluorescence data
-
-{c.BOLD}Output Variables:{c.RESET}
-    ht_data           3D HT volume (Z x Y x X)
-    fl_CH0, etc.      FL channel volumes (if present)
-    ht_resolution     [Z, Y, X] resolution in um
-    fl_resolution     [Z, Y, X] FL resolution in um
-    magnification     Objective magnification
-    numerical_aperture
-    medium_ri         Medium refractive index
-
-{c.BOLD}Examples:{c.RESET}
-    python -m tomocube mat sample.TCF
-    python -m tomocube mat sample.TCF output.mat --no-fl
-""")
+        _print_subcommand_help(
+            "MATLAB Export",
+            "python -m tomocube mat <file.TCF> [output.mat] [options]",
+            [
+                ("--no-fl", "", "Exclude fluorescence data"),
+            ],
+            [
+                ("Export all data", "python -m tomocube mat sample.TCF"),
+                ("Export HT only", "python -m tomocube mat sample.TCF output.mat --no-fl"),
+            ],
+        )
+        print(f"  {s.BOLD}Output Variables{s.RESET}")
+        print(f"    {s.CYAN}ht_data{s.RESET}           3D HT volume (Z x Y x X)")
+        print(f"    {s.CYAN}fl_CH0{s.RESET}, etc.      FL channel volumes")
+        print(f"    {s.CYAN}ht_resolution{s.RESET}     [Z, Y, X] resolution in um")
+        print(f"    {s.CYAN}magnification{s.RESET}     Objective magnification")
+        print()
         return 1
 
     tcf_path = parts[0]
@@ -446,18 +524,18 @@ def _convert_mat(args: str) -> int:
         _print_error(f"File not found: {tcf_path}")
         return 1
 
-    print(f"\n{c.BOLD}Exporting to MATLAB{c.RESET}")
-    _print_progress(f"Input: {tcf_path}")
-    _print_progress(f"Include FL: {include_fl}")
-    _print_progress("Loading data...")
+    _print_export_header("MATLAB Export", tcf_path)
+    _print_step(f"Include FL: {'yes' if include_fl else 'no'}", "info")
+    print()
+    _print_step("Loading data...")
 
     try:
         with TCFFileLoader(tcf_path) as loader:
             loader.load_timepoint(0)
-            _print_progress("Converting...", done=True)
+            _print_step("Converting to MAT...", "done")
             result = export_to_mat(loader, output_path, include_fl=include_fl)
 
-        _print_success(f"Saved: {result}")
+        _print_success(str(result))
         return 0
     except Exception as e:
         _print_error(str(e))
@@ -469,27 +547,23 @@ def _convert_gif(args: str) -> int:
     from tomocube.core.file import TCFFileLoader
     from tomocube.processing.export import export_overlay_gif, export_to_gif
 
-    c = Colors
     parts = args.split() if args else []
 
     if not parts:
-        print(f"""
-{c.BOLD}GIF Animation{c.RESET}
-
-{c.BOLD}Usage:{c.RESET}
-    python -m tomocube gif <file.TCF> [output.gif] [options]
-
-{c.BOLD}Options:{c.RESET}
-    --overlay         Create HT+FL overlay animation (green FL on grayscale HT)
-    --fps <N>         Frame rate {c.DIM}(default: 10){c.RESET}
-    --axis <z|y|x>    Slice axis for animation {c.DIM}(default: z){c.RESET}
-
-{c.BOLD}Examples:{c.RESET}
-    python -m tomocube gif sample.TCF                    {c.DIM}# Z-stack animation{c.RESET}
-    python -m tomocube gif sample.TCF anim.gif --fps 15  {c.DIM}# Custom frame rate{c.RESET}
-    python -m tomocube gif sample.TCF --axis y           {c.DIM}# Y-slice animation{c.RESET}
-    python -m tomocube gif sample.TCF --overlay          {c.DIM}# HT+FL overlay{c.RESET}
-""")
+        _print_subcommand_help(
+            "GIF Animation",
+            "python -m tomocube gif <file.TCF> [output.gif] [options]",
+            [
+                ("--overlay", "", "Create HT+FL overlay animation"),
+                ("--fps", "<N>", "Frame rate (default: 10)"),
+                ("--axis", "<z|y|x>", "Slice axis for animation (default: z)"),
+            ],
+            [
+                ("Z-stack animation", "python -m tomocube gif sample.TCF"),
+                ("Custom frame rate", "python -m tomocube gif sample.TCF anim.gif --fps 15"),
+                ("HT+FL overlay", "python -m tomocube gif sample.TCF --overlay"),
+            ],
+        )
         return 1
 
     tcf_path = parts[0]
@@ -523,11 +597,12 @@ def _convert_gif(args: str) -> int:
         _print_error(f"File not found: {tcf_path}")
         return 1
 
-    print(f"\n{c.BOLD}Creating GIF Animation{c.RESET}")
-    _print_progress(f"Input: {tcf_path}")
-    _print_progress(f"Mode: {'HT+FL overlay' if overlay else f'{axis.upper()}-stack'}")
-    _print_progress(f"Frame rate: {fps} fps")
-    _print_progress("Loading data...")
+    mode = "HT+FL overlay" if overlay else f"{axis.upper()}-stack"
+    _print_export_header("GIF Animation", tcf_path)
+    _print_step(f"Mode: {mode}", "info")
+    _print_step(f"Frame rate: {fps} fps", "info")
+    print()
+    _print_step("Loading data...")
 
     try:
         with TCFFileLoader(tcf_path) as loader:
@@ -537,13 +612,13 @@ def _convert_gif(args: str) -> int:
                 if not loader.has_fluorescence:
                     _print_error("No fluorescence data available for overlay mode")
                     return 1
-                _print_progress("Generating overlay frames...", done=True)
+                _print_step("Generating frames...", "done")
                 result = export_overlay_gif(loader, output_path, fps=fps)
             else:
-                _print_progress(f"Generating {axis.upper()}-slice frames...", done=True)
+                _print_step("Generating frames...", "done")
                 result = export_to_gif(loader, output_path, axis=axis, fps=fps)
 
-        _print_success(f"Saved: {result}")
+        _print_success(str(result))
         return 0
     except Exception as e:
         _print_error(str(e))
