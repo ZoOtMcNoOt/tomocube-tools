@@ -7,6 +7,8 @@ Run 'python -m tomocube help' for usage information.
 from __future__ import annotations
 
 import sys
+import time
+import threading
 from pathlib import Path
 
 import h5py
@@ -56,9 +58,130 @@ class Style:
                 setattr(cls, attr, "")
 
 
+class Icons:
+    """Unicode icons and box-drawing characters."""
+    # Status icons
+    CHECK = "✓"
+    CROSS = "✗"
+    ARROW = "→"
+    BULLET = "●"
+    CIRCLE = "○"
+    DIAMOND = "◆"
+    STAR = "★"
+    SPARK = "✦"
+    
+    # Box drawing
+    BOX_H = "─"
+    BOX_V = "│"
+    BOX_TL = "╭"
+    BOX_TR = "╮"
+    BOX_BL = "╰"
+    BOX_BR = "╯"
+    BOX_T = "┬"
+    BOX_B = "┴"
+    BOX_L = "├"
+    BOX_R = "┤"
+    BOX_X = "┼"
+    
+    # Double box
+    DBL_H = "═"
+    DBL_V = "║"
+    
+    # Arrows and pointers
+    CHEVRON = "›"
+    POINTER = "▸"
+    TRIANGLE = "▲"
+    
+    # Progress
+    BLOCK_FULL = "█"
+    BLOCK_MED = "▓"
+    BLOCK_LIGHT = "░"
+    
+    # Decorative
+    DOTS = "···"
+    ELLIPSIS = "…"
+    
+    @classmethod
+    def disable(cls) -> None:
+        """Replace unicode with ASCII fallbacks."""
+        cls.CHECK = "+"
+        cls.CROSS = "x"
+        cls.ARROW = "->"
+        cls.BULLET = "*"
+        cls.CIRCLE = "o"
+        cls.DIAMOND = "*"
+        cls.STAR = "*"
+        cls.SPARK = "*"
+        cls.BOX_H = "-"
+        cls.BOX_V = "|"
+        cls.BOX_TL = "+"
+        cls.BOX_TR = "+"
+        cls.BOX_BL = "+"
+        cls.BOX_BR = "+"
+        cls.BOX_T = "+"
+        cls.BOX_B = "+"
+        cls.BOX_L = "+"
+        cls.BOX_R = "+"
+        cls.BOX_X = "+"
+        cls.DBL_H = "="
+        cls.DBL_V = "|"
+        cls.CHEVRON = ">"
+        cls.POINTER = ">"
+        cls.TRIANGLE = "^"
+        cls.BLOCK_FULL = "#"
+        cls.BLOCK_MED = "#"
+        cls.BLOCK_LIGHT = "."
+        cls.DOTS = "..."
+        cls.ELLIPSIS = "..."
+
+
+class Spinner:
+    """Animated spinner for long operations."""
+    
+    FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+    FALLBACK = ["|", "/", "-", "\\"]
+    
+    def __init__(self, message: str = ""):
+        self.message = message
+        self._stop = False
+        self._thread: threading.Thread | None = None
+        self._frames = self.FRAMES if sys.stdout.isatty() else self.FALLBACK
+    
+    def __enter__(self) -> "Spinner":
+        self.start()
+        return self
+    
+    def __exit__(self, *args) -> None:
+        self.stop()
+    
+    def start(self) -> None:
+        self._stop = False
+        self._thread = threading.Thread(target=self._spin, daemon=True)
+        self._thread.start()
+    
+    def stop(self, success: bool = True) -> None:
+        self._stop = True
+        if self._thread:
+            self._thread.join(timeout=0.5)
+        # Clear spinner line and print final status
+        sys.stdout.write("\r\033[K")
+        sys.stdout.flush()
+    
+    def _spin(self) -> None:
+        s = Style
+        i = 0
+        while not self._stop:
+            frame = self._frames[i % len(self._frames)]
+            sys.stdout.write(f"\r  {s.CYAN}{frame}{s.RESET} {self.message}")
+            sys.stdout.flush()
+            time.sleep(0.08)
+            i += 1
+
+
 # Disable colors if not a TTY or on Windows without ANSI support
 if not sys.stdout.isatty():
     Style.disable()
+    Icons.disable()
 
 
 def _styled(text: str, *styles: str) -> str:
@@ -66,11 +189,43 @@ def _styled(text: str, *styles: str) -> str:
     return "".join(styles) + text + Style.RESET
 
 
+def _box(content: list[str], width: int = 54, title: str = "") -> list[str]:
+    """Create a box around content."""
+    i = Icons
+    s = Style
+    lines = []
+    
+    # Top border with optional title
+    if title:
+        title_str = f" {title} "
+        pad_left = (width - len(title_str) - 2) // 2
+        pad_right = width - len(title_str) - 2 - pad_left
+        lines.append(f"  {s.BRIGHT_BLACK}{i.BOX_TL}{i.BOX_H * pad_left}{s.RESET}{s.BOLD}{title_str}{s.RESET}{s.BRIGHT_BLACK}{i.BOX_H * pad_right}{i.BOX_TR}{s.RESET}")
+    else:
+        lines.append(f"  {s.BRIGHT_BLACK}{i.BOX_TL}{i.BOX_H * width}{i.BOX_TR}{s.RESET}")
+    
+    # Content
+    for line in content:
+        # Strip ANSI codes for length calculation
+        import re
+        clean_line = re.sub(r'\033\[[0-9;]*m', '', line)
+        padding = width - len(clean_line) - 2
+        lines.append(f"  {s.BRIGHT_BLACK}{i.BOX_V}{s.RESET} {line}{' ' * padding}{s.BRIGHT_BLACK}{i.BOX_V}{s.RESET}")
+    
+    # Bottom border
+    lines.append(f"  {s.BRIGHT_BLACK}{i.BOX_BL}{i.BOX_H * width}{i.BOX_BR}{s.RESET}")
+    
+    return lines
+
+
 def _print_logo() -> None:
     """Print the Tomocube Tools logo."""
     s = Style
+    i = Icons
+    
     print()
-    print(f"  {s.BRIGHT_CYAN}{s.BOLD}TOMOCUBE{s.RESET} {s.DIM}Tools{s.RESET} {s.BRIGHT_BLACK}v0.1.0{s.RESET}")
+    # Stylized header
+    print(f"  {s.BRIGHT_CYAN}{s.BOLD}{i.DIAMOND} TOMOCUBE{s.RESET} {s.DIM}Tools{s.RESET} {s.BRIGHT_BLACK}v0.1.0{s.RESET}")
     print(f"  {s.BRIGHT_BLACK}Holotomography data processing{s.RESET}")
     print()
 
@@ -78,94 +233,107 @@ def _print_logo() -> None:
 def _print_help() -> None:
     """Print comprehensive help information."""
     s = Style
+    i = Icons
 
     _print_logo()
-
-    # Usage
-    print(f"  {s.BOLD}Usage:{s.RESET} python -m tomocube {s.CYAN}<command>{s.RESET} {s.DIM}[options]{s.RESET}")
+    
+    # Usage box
+    print(f"  {s.BOLD}USAGE{s.RESET}")
+    print(f"  {s.BRIGHT_BLACK}{i.BOX_H * 54}{s.RESET}")
+    print(f"  python -m tomocube {s.CYAN}<command>{s.RESET} {s.DIM}[file] [options]{s.RESET}")
     print()
 
-    # Commands section
-    print(f"  {s.BOLD}Commands{s.RESET}")
+    # Commands section with grouped layout
+    print(f"  {s.BOLD}COMMANDS{s.RESET}")
+    print(f"  {s.BRIGHT_BLACK}{i.BOX_H * 54}{s.RESET}")
+    print()
+    
+    # Visualization group
+    print(f"  {s.BRIGHT_MAGENTA}{i.POINTER}{s.RESET} {s.BOLD}Visualization{s.RESET}")
+    print(f"  {s.BRIGHT_BLACK}{i.BOX_V}{s.RESET}")
+    print(f"  {s.BRIGHT_BLACK}{i.BOX_L}{i.BOX_H}{s.RESET} {s.CYAN}view{s.RESET}  {s.DIM}<file>{s.RESET}  {s.BRIGHT_BLACK}{i.ARROW}{s.RESET}  Interactive 3D orthogonal slice viewer")
+    print(f"  {s.BRIGHT_BLACK}{i.BOX_BL}{i.BOX_H}{s.RESET} {s.CYAN}slice{s.RESET} {s.DIM}<file>{s.RESET}  {s.BRIGHT_BLACK}{i.ARROW}{s.RESET}  Side-by-side HT/FL comparison")
+    print()
+    
+    # Information group
+    print(f"  {s.BRIGHT_BLUE}{i.POINTER}{s.RESET} {s.BOLD}Information{s.RESET}")
+    print(f"  {s.BRIGHT_BLACK}{i.BOX_V}{s.RESET}")
+    print(f"  {s.BRIGHT_BLACK}{i.BOX_L}{i.BOX_H}{s.RESET} {s.CYAN}info{s.RESET}  {s.DIM}<file>{s.RESET}  {s.BRIGHT_BLACK}{i.ARROW}{s.RESET}  Display file metadata & structure")
+    print(f"  {s.BRIGHT_BLACK}{i.BOX_BL}{i.BOX_H}{s.RESET} {s.CYAN}help{s.RESET}          {s.BRIGHT_BLACK}{i.ARROW}{s.RESET}  Show this help message")
+    print()
+    
+    # Export group
+    print(f"  {s.BRIGHT_GREEN}{i.POINTER}{s.RESET} {s.BOLD}Export{s.RESET}")
+    print(f"  {s.BRIGHT_BLACK}{i.BOX_V}{s.RESET}")
+    print(f"  {s.BRIGHT_BLACK}{i.BOX_L}{i.BOX_H}{s.RESET} {s.CYAN}tiff{s.RESET}  {s.DIM}<file>{s.RESET}  {s.BRIGHT_BLACK}{i.ARROW}{s.RESET}  Export to multi-page TIFF stack")
+    print(f"  {s.BRIGHT_BLACK}{i.BOX_L}{i.BOX_H}{s.RESET} {s.CYAN}mat{s.RESET}   {s.DIM}<file>{s.RESET}  {s.BRIGHT_BLACK}{i.ARROW}{s.RESET}  Export to MATLAB .mat format")
+    print(f"  {s.BRIGHT_BLACK}{i.BOX_BL}{i.BOX_H}{s.RESET} {s.CYAN}gif{s.RESET}   {s.DIM}<file>{s.RESET}  {s.BRIGHT_BLACK}{i.ARROW}{s.RESET}  Create animated GIF")
     print()
 
-    # Visualization
-    print(f"    {s.BRIGHT_BLACK}Visualization{s.RESET}")
-    print(f"      {s.CYAN}view{s.RESET}  {s.DIM}<file>{s.RESET}    Interactive 3D viewer with orthogonal slices")
-    print(f"      {s.CYAN}slice{s.RESET} {s.DIM}<file>{s.RESET}    Side-by-side HT/FL comparison viewer")
+    # Options section
+    print(f"  {s.BOLD}OPTIONS{s.RESET}")
+    print(f"  {s.BRIGHT_BLACK}{i.BOX_H * 54}{s.RESET}")
+    print()
+    
+    # TIFF options
+    print(f"  {s.YELLOW}{i.BULLET}{s.RESET} {s.BOLD}tiff{s.RESET}")
+    print(f"      {s.CYAN}--fl{s.RESET} {s.DIM}<CH>{s.RESET}      Export fluorescence channel (e.g., CH0)")
+    print(f"      {s.CYAN}--16bit{s.RESET}        16-bit output {s.BRIGHT_BLACK}(default){s.RESET}")
+    print(f"      {s.CYAN}--32bit{s.RESET}        32-bit float output")
+    print()
+    
+    # MAT options
+    print(f"  {s.YELLOW}{i.BULLET}{s.RESET} {s.BOLD}mat{s.RESET}")
+    print(f"      {s.CYAN}--no-fl{s.RESET}        Exclude fluorescence data")
+    print()
+    
+    # GIF options
+    print(f"  {s.YELLOW}{i.BULLET}{s.RESET} {s.BOLD}gif{s.RESET}")
+    print(f"      {s.CYAN}--overlay{s.RESET}      HT+FL overlay animation")
+    print(f"      {s.CYAN}--fps{s.RESET} {s.DIM}<N>{s.RESET}      Frame rate {s.BRIGHT_BLACK}(default: 10){s.RESET}")
+    print(f"      {s.CYAN}--axis{s.RESET} {s.DIM}<z|y|x>{s.RESET} Slice axis {s.BRIGHT_BLACK}(default: z){s.RESET}")
     print()
 
-    # Information
-    print(f"    {s.BRIGHT_BLACK}Information{s.RESET}")
-    print(f"      {s.CYAN}info{s.RESET}  {s.DIM}<file>{s.RESET}    Display file metadata and structure")
-    print(f"      {s.CYAN}help{s.RESET}            Show this help message")
+    # Keyboard shortcuts in a nice grid
+    print(f"  {s.BOLD}VIEWER SHORTCUTS{s.RESET}")
+    print(f"  {s.BRIGHT_BLACK}{i.BOX_H * 54}{s.RESET}")
     print()
-
-    # Export
-    print(f"    {s.BRIGHT_BLACK}Export{s.RESET}")
-    print(f"      {s.CYAN}tiff{s.RESET}  {s.DIM}<file>{s.RESET}    Export to multi-page TIFF stack")
-    print(f"      {s.CYAN}mat{s.RESET}   {s.DIM}<file>{s.RESET}    Export to MATLAB .mat format")
-    print(f"      {s.CYAN}gif{s.RESET}   {s.DIM}<file>{s.RESET}    Create animated GIF")
-    print()
-
-    # Options
-    print(f"  {s.BOLD}Export Options{s.RESET}")
-    print()
-    print(f"    {s.YELLOW}tiff{s.RESET}")
-    print(f"      {s.DIM}--fl <CH>{s.RESET}       Export fluorescence channel instead of HT")
-    print(f"      {s.DIM}--16bit{s.RESET}         16-bit output {s.BRIGHT_BLACK}(default){s.RESET}")
-    print(f"      {s.DIM}--32bit{s.RESET}         32-bit float output")
-    print()
-    print(f"    {s.YELLOW}mat{s.RESET}")
-    print(f"      {s.DIM}--no-fl{s.RESET}         Exclude fluorescence data")
-    print()
-    print(f"    {s.YELLOW}gif{s.RESET}")
-    print(f"      {s.DIM}--overlay{s.RESET}       HT+FL overlay animation")
-    print(f"      {s.DIM}--fps <N>{s.RESET}       Frame rate {s.BRIGHT_BLACK}(default: 10){s.RESET}")
-    print(f"      {s.DIM}--axis <z|y|x>{s.RESET}  Slice axis {s.BRIGHT_BLACK}(default: z){s.RESET}")
-    print()
-
-    # Keyboard shortcuts
-    print(f"  {s.BOLD}Viewer Shortcuts{s.RESET}")
-    print()
-    _print_shortcut_row([
-        ("Up/Down", "Navigate Z"),
-        ("A", "Auto contrast"),
-        ("D", "Distance"),
-        ("S", "Save PNG"),
-    ])
-    _print_shortcut_row([
-        ("Scroll", "Navigate Z"),
-        ("G", "Global contrast"),
-        ("P", "Polygon area"),
-        ("M", "Save MIP"),
-    ])
-    _print_shortcut_row([
-        ("Click", "Select pos"),
-        ("I", "Invert cmap"),
-        ("C", "Clear meas"),
-        ("F", "Toggle FL"),
-    ])
-    _print_shortcut_row([
-        ("1-6", "Colormap"),
-        ("R", "Reset view"),
-        ("Q", "Quit"),
-        ("", ""),
+    
+    _print_shortcut_grid([
+        [("↑↓", "Navigate Z"), ("A", "Auto contrast"), ("D", "Distance"), ("S", "Save PNG")],
+        [("⎚", "Scroll Z"), ("G", "Global contrast"), ("P", "Polygon"), ("M", "Save MIP")],
+        [("Click", "Select"), ("I", "Invert cmap"), ("C", "Clear"), ("F", "Toggle FL")],
+        [("1-6", "Colormap"), ("R", "Reset view"), ("Q", "Quit"), ("", "")],
     ])
     print()
 
     # Examples
-    print(f"  {s.BOLD}Examples{s.RESET}")
+    print(f"  {s.BOLD}EXAMPLES{s.RESET}")
+    print(f"  {s.BRIGHT_BLACK}{i.BOX_H * 54}{s.RESET}")
     print()
-    print(f"    {s.BRIGHT_BLACK}# View a TCF file{s.RESET}")
-    print(f"    {s.DIM}${s.RESET} python -m tomocube view sample.TCF")
+    print(f"  {s.BRIGHT_BLACK}# View a TCF file{s.RESET}")
+    print(f"  {s.DIM}${s.RESET} python -m tomocube view sample.TCF")
     print()
-    print(f"    {s.BRIGHT_BLACK}# Export to TIFF{s.RESET}")
-    print(f"    {s.DIM}${s.RESET} python -m tomocube tiff sample.TCF --32bit")
+    print(f"  {s.BRIGHT_BLACK}# Export to 32-bit TIFF{s.RESET}")
+    print(f"  {s.DIM}${s.RESET} python -m tomocube tiff sample.TCF --32bit")
     print()
-    print(f"    {s.BRIGHT_BLACK}# Create overlay animation{s.RESET}")
-    print(f"    {s.DIM}${s.RESET} python -m tomocube gif sample.TCF --overlay --fps 15")
+    print(f"  {s.BRIGHT_BLACK}# Create HT+FL overlay animation{s.RESET}")
+    print(f"  {s.DIM}${s.RESET} python -m tomocube gif sample.TCF --overlay --fps 15")
     print()
+
+
+def _print_shortcut_grid(rows: list[list[tuple[str, str]]]) -> None:
+    """Print keyboard shortcuts in a grid."""
+    s = Style
+    i = Icons
+    for row in rows:
+        parts = []
+        for key, desc in row:
+            if key:
+                parts.append(f"  {s.CYAN}{key:6}{s.RESET} {s.DIM}{desc:12}{s.RESET}")
+            else:
+                parts.append(" " * 20)
+        print("".join(parts))
 
 
 def _print_shortcut_row(shortcuts: list[tuple[str, str]]) -> None:
@@ -183,16 +351,22 @@ def _print_shortcut_row(shortcuts: list[tuple[str, str]]) -> None:
 def _print_short_usage() -> None:
     """Print short usage when no command given."""
     s = Style
+    i = Icons
     _print_logo()
 
-    print(f"  {s.BOLD}Usage:{s.RESET} python -m tomocube {s.CYAN}<command>{s.RESET} {s.DIM}[options]{s.RESET}")
+    print(f"  {s.BOLD}USAGE{s.RESET}")
+    print(f"  {s.BRIGHT_BLACK}{i.BOX_H * 54}{s.RESET}")
+    print(f"  python -m tomocube {s.CYAN}<command>{s.RESET} {s.DIM}[file] [options]{s.RESET}")
     print()
-    print(f"  {s.BOLD}Commands{s.RESET}")
-    print(f"    {s.CYAN}view{s.RESET}   Interactive 3D viewer      {s.CYAN}tiff{s.RESET}   Export TIFF stack")
-    print(f"    {s.CYAN}slice{s.RESET}  HT/FL comparison           {s.CYAN}mat{s.RESET}    Export MATLAB .mat")
-    print(f"    {s.CYAN}info{s.RESET}   Show file metadata         {s.CYAN}gif{s.RESET}    Create animation")
+    
+    print(f"  {s.BOLD}COMMANDS{s.RESET}")
+    print(f"  {s.BRIGHT_BLACK}{i.BOX_H * 54}{s.RESET}")
     print()
-    print(f"  {s.DIM}Run{s.RESET} python -m tomocube help {s.DIM}for detailed usage{s.RESET}")
+    print(f"    {s.CYAN}view{s.RESET}   Interactive 3D viewer     {s.CYAN}tiff{s.RESET}   Export TIFF stack")
+    print(f"    {s.CYAN}slice{s.RESET}  HT/FL comparison          {s.CYAN}mat{s.RESET}    Export MATLAB .mat")
+    print(f"    {s.CYAN}info{s.RESET}   File metadata             {s.CYAN}gif{s.RESET}    Create animation")
+    print()
+    print(f"  {s.DIM}Run{s.RESET} python -m tomocube help {s.DIM}for detailed options{s.RESET}")
     print()
 
 
@@ -221,49 +395,60 @@ def _print_info(file_path: str) -> int:
     fov_y = ht_y * res_y
     fov_z = ht_z * res_z
 
+    i = Icons
+    
     print()
-    print(f"  {s.BRIGHT_CYAN}{s.BOLD}TCF File Info{s.RESET}")
-    print(f"  {s.BRIGHT_BLACK}{'=' * 50}{s.RESET}")
-    print()
-
-    # File
-    print(f"  {s.BOLD}File{s.RESET}")
-    print(f"    {s.DIM}Name{s.RESET}         {s.GREEN}{tcf_path.name}{s.RESET}")
-    print(f"    {s.DIM}Location{s.RESET}     {s.BRIGHT_BLACK}{tcf_path.parent}{s.RESET}")
+    print(f"  {s.BRIGHT_CYAN}{s.BOLD}{i.DIAMOND} TCF File Info{s.RESET}")
+    print(f"  {s.BRIGHT_BLACK}{i.BOX_H * 54}{s.RESET}")
     print()
 
-    # Holotomography
-    print(f"  {s.BOLD}Holotomography{s.RESET}")
-    print(f"    {s.DIM}Volume{s.RESET}       {s.YELLOW}{ht_z}{s.RESET} x {s.YELLOW}{ht_y}{s.RESET} x {s.YELLOW}{ht_x}{s.RESET} {s.BRIGHT_BLACK}(Z x Y x X){s.RESET}")
-    print(f"    {s.DIM}Resolution{s.RESET}   {res_x:.3f} x {res_y:.3f} x {res_z:.3f} {s.BRIGHT_BLACK}um/px{s.RESET}")
-    print(f"    {s.DIM}FOV{s.RESET}          {fov_x:.1f} x {fov_y:.1f} x {fov_z:.1f} {s.BRIGHT_BLACK}um{s.RESET}")
+    # File section
+    print(f"  {s.BRIGHT_BLUE}{i.POINTER}{s.RESET} {s.BOLD}File{s.RESET}")
+    print(f"  {s.BRIGHT_BLACK}{i.BOX_V}{s.RESET}")
+    print(f"  {s.BRIGHT_BLACK}{i.BOX_L}{i.BOX_H}{s.RESET} Name       {s.GREEN}{tcf_path.name}{s.RESET}")
+    print(f"  {s.BRIGHT_BLACK}{i.BOX_BL}{i.BOX_H}{s.RESET} Location   {s.BRIGHT_BLACK}{tcf_path.parent}{s.RESET}")
+    print()
+
+    # Holotomography section
+    print(f"  {s.BRIGHT_MAGENTA}{i.POINTER}{s.RESET} {s.BOLD}Holotomography{s.RESET}")
+    print(f"  {s.BRIGHT_BLACK}{i.BOX_V}{s.RESET}")
+    print(f"  {s.BRIGHT_BLACK}{i.BOX_L}{i.BOX_H}{s.RESET} Volume     {s.YELLOW}{ht_z}{s.RESET} × {s.YELLOW}{ht_y}{s.RESET} × {s.YELLOW}{ht_x}{s.RESET}  {s.BRIGHT_BLACK}(Z × Y × X){s.RESET}")
+    print(f"  {s.BRIGHT_BLACK}{i.BOX_L}{i.BOX_H}{s.RESET} Resolution {res_x:.3f} × {res_y:.3f} × {res_z:.3f} {s.BRIGHT_BLACK}μm/px{s.RESET}")
+    print(f"  {s.BRIGHT_BLACK}{i.BOX_L}{i.BOX_H}{s.RESET} FOV        {fov_x:.1f} × {fov_y:.1f} × {fov_z:.1f} {s.BRIGHT_BLACK}μm{s.RESET}")
     if info.ri_min is not None and info.ri_max is not None:
-        print(f"    {s.DIM}RI Range{s.RESET}     {s.CYAN}{info.ri_min:.4f}{s.RESET} - {s.CYAN}{info.ri_max:.4f}{s.RESET}")
-    print()
-
-    # Optics
-    print(f"  {s.BOLD}Optics{s.RESET}")
-    print(f"    {s.DIM}Magnification{s.RESET}  {s.YELLOW}{info.magnification or '?'}x{s.RESET}")
-    print(f"    {s.DIM}NA{s.RESET}             {info.numerical_aperture or '?'}")
-    print(f"    {s.DIM}Medium RI{s.RESET}      {info.medium_ri or '?'}")
-    print()
-
-    # Acquisition
-    print(f"  {s.BOLD}Acquisition{s.RESET}")
-    print(f"    {s.DIM}Timepoints{s.RESET}   {len(info.timepoints)}")
-    print()
-
-    # Fluorescence
-    if info.has_fluorescence:
-        print(f"  {s.BOLD}Fluorescence{s.RESET}  {s.GREEN}Available{s.RESET}")
-        print(f"    {s.DIM}Channels{s.RESET}     {', '.join(info.fl_channels)}")
-        for ch, shape in info.fl_shapes.items():
-            fl_z, fl_y, fl_x = shape
-            print(f"    {s.DIM}{ch} Volume{s.RESET}   {fl_z} x {fl_y} x {fl_x}")
-        fl_res = info.fl_resolution
-        print(f"    {s.DIM}Resolution{s.RESET}   {fl_res[2]:.3f} x {fl_res[1]:.3f} x {fl_res[0]:.3f} {s.BRIGHT_BLACK}um/px{s.RESET}")
+        print(f"  {s.BRIGHT_BLACK}{i.BOX_BL}{i.BOX_H}{s.RESET} RI Range   {s.CYAN}{info.ri_min:.4f}{s.RESET} {i.ARROW} {s.CYAN}{info.ri_max:.4f}{s.RESET}")
     else:
-        print(f"  {s.BOLD}Fluorescence{s.RESET}  {s.BRIGHT_BLACK}Not available{s.RESET}")
+        # Close the box
+        pass
+    print()
+
+    # Optics section
+    print(f"  {s.BRIGHT_YELLOW}{i.POINTER}{s.RESET} {s.BOLD}Optics{s.RESET}")
+    print(f"  {s.BRIGHT_BLACK}{i.BOX_V}{s.RESET}")
+    print(f"  {s.BRIGHT_BLACK}{i.BOX_L}{i.BOX_H}{s.RESET} Magnification  {s.YELLOW}{info.magnification or '?'}×{s.RESET}")
+    print(f"  {s.BRIGHT_BLACK}{i.BOX_L}{i.BOX_H}{s.RESET} NA             {info.numerical_aperture or '?'}")
+    print(f"  {s.BRIGHT_BLACK}{i.BOX_BL}{i.BOX_H}{s.RESET} Medium RI      {info.medium_ri or '?'}")
+    print()
+
+    # Acquisition section
+    print(f"  {s.BRIGHT_CYAN}{i.POINTER}{s.RESET} {s.BOLD}Acquisition{s.RESET}")
+    print(f"  {s.BRIGHT_BLACK}{i.BOX_V}{s.RESET}")
+    print(f"  {s.BRIGHT_BLACK}{i.BOX_BL}{i.BOX_H}{s.RESET} Timepoints   {len(info.timepoints)}")
+    print()
+
+    # Fluorescence section
+    if info.has_fluorescence:
+        print(f"  {s.BRIGHT_GREEN}{i.POINTER}{s.RESET} {s.BOLD}Fluorescence{s.RESET}  {s.GREEN}{i.CHECK} Available{s.RESET}")
+        print(f"  {s.BRIGHT_BLACK}{i.BOX_V}{s.RESET}")
+        print(f"  {s.BRIGHT_BLACK}{i.BOX_L}{i.BOX_H}{s.RESET} Channels     {s.CYAN}{', '.join(info.fl_channels)}{s.RESET}")
+        for idx, (ch, shape) in enumerate(info.fl_shapes.items()):
+            fl_z, fl_y, fl_x = shape
+            prefix = i.BOX_L if idx < len(info.fl_shapes) - 1 else i.BOX_L
+            print(f"  {s.BRIGHT_BLACK}{prefix}{i.BOX_H}{s.RESET} {ch} Volume   {fl_z} × {fl_y} × {fl_x}")
+        fl_res = info.fl_resolution
+        print(f"  {s.BRIGHT_BLACK}{i.BOX_BL}{i.BOX_H}{s.RESET} Resolution   {fl_res[2]:.3f} × {fl_res[1]:.3f} × {fl_res[0]:.3f} {s.BRIGHT_BLACK}μm/px{s.RESET}")
+    else:
+        print(f"  {s.BRIGHT_BLACK}{i.POINTER}{s.RESET} {s.BOLD}Fluorescence{s.RESET}  {s.BRIGHT_BLACK}{i.CROSS} Not available{s.RESET}")
 
     print()
     return 0
@@ -272,35 +457,39 @@ def _print_info(file_path: str) -> int:
 def _print_error(message: str) -> None:
     """Print an error message."""
     s = Style
+    i = Icons
     print()
-    print(f"  {s.RED}{s.BOLD}Error{s.RESET} {message}")
+    print(f"  {s.RED}{i.CROSS}{s.RESET} {s.RED}{s.BOLD}Error{s.RESET} {message}")
     print()
 
 
 def _print_success(path: str) -> None:
     """Print a success message."""
     s = Style
-    print(f"  {s.GREEN}{s.BOLD}Saved{s.RESET} {path}")
+    i = Icons
+    print(f"  {s.GREEN}{i.CHECK}{s.RESET} {s.GREEN}{s.BOLD}Saved{s.RESET} {path}")
     print()
 
 
 def _print_step(message: str, status: str = "working") -> None:
     """Print a step in a process."""
     s = Style
+    i = Icons
     if status == "working":
-        print(f"  {s.YELLOW}>{s.RESET} {message}")
+        print(f"  {s.YELLOW}{i.CHEVRON}{s.RESET} {message}")
     elif status == "done":
-        print(f"  {s.GREEN}>{s.RESET} {message}")
+        print(f"  {s.GREEN}{i.CHECK}{s.RESET} {message}")
     elif status == "info":
-        print(f"  {s.BRIGHT_BLACK}>{s.RESET} {s.DIM}{message}{s.RESET}")
+        print(f"  {s.BRIGHT_BLACK}{i.CIRCLE}{s.RESET} {s.DIM}{message}{s.RESET}")
 
 
 def _print_export_header(title: str, input_file: str) -> None:
     """Print export operation header."""
     s = Style
+    i = Icons
     print()
-    print(f"  {s.BRIGHT_CYAN}{s.BOLD}{title}{s.RESET}")
-    print(f"  {s.BRIGHT_BLACK}{'=' * 50}{s.RESET}")
+    print(f"  {s.BRIGHT_CYAN}{s.BOLD}{i.DIAMOND} {title}{s.RESET}")
+    print(f"  {s.BRIGHT_BLACK}{i.BOX_H * 54}{s.RESET}")
     print()
     _print_step(f"Input: {Path(input_file).name}", "info")
 
@@ -379,28 +568,35 @@ def main() -> int:
 def _print_subcommand_help(name: str, usage: str, options: list[tuple[str, str, str]], examples: list[tuple[str, str]]) -> None:
     """Print help for a subcommand."""
     s = Style
+    i = Icons
+    
     print()
-    print(f"  {s.BRIGHT_CYAN}{s.BOLD}{name}{s.RESET}")
+    print(f"  {s.BRIGHT_CYAN}{s.BOLD}{i.DIAMOND} {name}{s.RESET}")
+    print(f"  {s.BRIGHT_BLACK}{i.BOX_H * 54}{s.RESET}")
     print()
-    print(f"  {s.BOLD}Usage{s.RESET}")
-    print(f"    {s.DIM}${s.RESET} {usage}")
+    
+    print(f"  {s.BOLD}USAGE{s.RESET}")
+    print(f"  {s.BRIGHT_BLACK}{i.BOX_H * 54}{s.RESET}")
+    print(f"  {s.DIM}${s.RESET} {usage}")
     print()
 
     if options:
-        print(f"  {s.BOLD}Options{s.RESET}")
+        print(f"  {s.BOLD}OPTIONS{s.RESET}")
+        print(f"  {s.BRIGHT_BLACK}{i.BOX_H * 54}{s.RESET}")
         for opt, arg, desc in options:
             if arg:
                 print(f"    {s.CYAN}{opt}{s.RESET} {s.DIM}{arg}{s.RESET}")
-                print(f"        {desc}")
+                print(f"        {s.BRIGHT_BLACK}{i.ARROW}{s.RESET} {desc}")
             else:
-                print(f"    {s.CYAN}{opt}{s.RESET}    {desc}")
+                print(f"    {s.CYAN}{opt}{s.RESET}  {s.BRIGHT_BLACK}{i.ARROW}{s.RESET} {desc}")
         print()
 
     if examples:
-        print(f"  {s.BOLD}Examples{s.RESET}")
+        print(f"  {s.BOLD}EXAMPLES{s.RESET}")
+        print(f"  {s.BRIGHT_BLACK}{i.BOX_H * 54}{s.RESET}")
         for comment, cmd in examples:
-            print(f"    {s.BRIGHT_BLACK}# {comment}{s.RESET}")
-            print(f"    {s.DIM}${s.RESET} {cmd}")
+            print(f"  {s.BRIGHT_BLACK}# {comment}{s.RESET}")
+            print(f"  {s.DIM}${s.RESET} {cmd}")
             print()
 
 
@@ -461,14 +657,18 @@ def _convert_tiff(args: list[str]) -> int:
     _print_step(f"Channel: {channel}", "info")
     _print_step(f"Bit depth: {bit_depth}", "info")
     print()
-    _print_step("Loading data...")
 
     try:
         with TCFFileLoader(tcf_path) as loader:
-            loader.load_timepoint(0)
-            _print_step("Converting to TIFF...", "done")
-            result = export_to_tiff(loader, output_path, channel=channel, bit_depth=bit_depth)
-
+            with Spinner("Loading data..."):
+                loader.load_timepoint(0)
+            _print_step("Data loaded", "done")
+            
+            with Spinner("Converting to TIFF..."):
+                result = export_to_tiff(loader, output_path, channel=channel, bit_depth=bit_depth)
+            _print_step("Conversion complete", "done")
+        
+        print()
         _print_success(str(result))
         return 0
     except Exception as e:
@@ -529,14 +729,18 @@ def _convert_mat(args: list[str]) -> int:
     _print_export_header("MATLAB Export", tcf_path)
     _print_step(f"Include FL: {'yes' if include_fl else 'no'}", "info")
     print()
-    _print_step("Loading data...")
 
     try:
         with TCFFileLoader(tcf_path) as loader:
-            loader.load_timepoint(0)
-            _print_step("Converting to MAT...", "done")
-            result = export_to_mat(loader, output_path, include_fl=include_fl)
-
+            with Spinner("Loading data..."):
+                loader.load_timepoint(0)
+            _print_step("Data loaded", "done")
+            
+            with Spinner("Converting to MAT..."):
+                result = export_to_mat(loader, output_path, include_fl=include_fl)
+            _print_step("Conversion complete", "done")
+        
+        print()
         _print_success(str(result))
         return 0
     except Exception as e:
@@ -604,22 +808,25 @@ def _convert_gif(args: list[str]) -> int:
     _print_step(f"Mode: {mode}", "info")
     _print_step(f"Frame rate: {fps} fps", "info")
     print()
-    _print_step("Loading data...")
 
     try:
         with TCFFileLoader(tcf_path) as loader:
-            loader.load_timepoint(0)
+            with Spinner("Loading data..."):
+                loader.load_timepoint(0)
+            _print_step("Data loaded", "done")
 
             if overlay:
                 if not loader.has_fluorescence:
                     _print_error("No fluorescence data available for overlay mode")
                     return 1
-                _print_step("Generating frames...", "done")
-                result = export_overlay_gif(loader, output_path, fps=fps)
+                with Spinner("Generating frames..."):
+                    result = export_overlay_gif(loader, output_path, fps=fps)
             else:
-                _print_step("Generating frames...", "done")
-                result = export_to_gif(loader, output_path, axis=axis, fps=fps)
-
+                with Spinner("Generating frames..."):
+                    result = export_to_gif(loader, output_path, axis=axis, fps=fps)
+        
+        _print_step("Animation complete", "done")
+        print()
         _print_success(str(result))
         return 0
     except Exception as e:
