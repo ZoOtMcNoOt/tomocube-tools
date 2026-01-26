@@ -62,8 +62,11 @@ class SliceViewer:
 
             # Get resolution info
             data_3d = f["Data/3D"]
-            self.res_xy = float(data_3d.attrs.get("ResolutionX", 0.196))
-            self.res_z = float(data_3d.attrs.get("ResolutionZ", 0.839))
+            res_x = data_3d.attrs.get("ResolutionX", 0.196)
+            res_z = data_3d.attrs.get("ResolutionZ", 0.839)
+            # Handle array attributes (extract first element if array)
+            self.res_xy = float(res_x[0]) if hasattr(res_x, '__len__') else float(res_x)
+            self.res_z = float(res_z[0]) if hasattr(res_z, '__len__') else float(res_z)
 
             # Load FL if available
             self.has_fl = "Data/3DFL/CH0/000000" in f
