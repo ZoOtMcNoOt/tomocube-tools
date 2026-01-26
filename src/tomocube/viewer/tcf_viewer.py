@@ -9,23 +9,37 @@ Features:
     - Fluorescence overlay with separate intensity colorbar
     - Adjustable contrast with auto and percentile options
     - Multiple colormaps with invert option
+    - Interactive distance and area measurements
     - Export slices or MIP as PNG
 
-Keyboard shortcuts:
-    Up/Down or scroll    Navigate Z-slices
-    Home/End             Jump to first/last slice
-    A                    Auto-contrast (current slice)
-    G                    Auto-contrast (global)
-    R                    Reset view
-    S                    Save current slice as PNG
-    M                    Save MIP as PNG
-    I                    Invert colormap
-    F                    Toggle fluorescence overlay
-    D                    Distance measurement mode
-    P                    Polygon/area measurement mode
-    C                    Clear all measurements
-    1-6                  Switch colormap
-    Escape/Q             Quit (or cancel measurement)
+Keyboard Shortcuts:
+    Navigation:
+        Up/Down, W/S     Navigate Z-slices
+        Scroll wheel     Navigate in focused view
+        Home/End         Jump to first/last slice
+        Click            Set crosshair position
+
+    Contrast:
+        A                Auto-contrast (current slice)
+        G                Global auto-contrast
+        R                Reset view
+        I                Invert colormap
+        1-6              Switch colormap
+
+    Fluorescence:
+        F                Toggle FL overlay
+
+    Measurements:
+        D                Distance measurement mode
+        P                Polygon/area measurement mode
+        C                Clear all measurements
+
+    Export:
+        S                Save current slice as PNG
+        M                Save MIP as PNG
+
+    General:
+        Q, Escape        Quit (or cancel measurement)
 """
 
 from __future__ import annotations
@@ -202,21 +216,31 @@ class TCFViewer:
     # =========================================================================
 
     def _setup_figure(self) -> None:
-        """Create the figure and all UI elements."""
+        """Create the figure and all UI elements.
+
+        Layout is carefully organized to prevent overlaps:
+        - Top: Info text (y=0.97) and buttons (y=0.92, 0.88)
+        - Middle: Views and colorbars (y=0.25-0.82)
+        - Bottom: Sliders (y=0.04-0.18) and colormap selector
+        """
         self._fig = plt.figure(figsize=(16, 10), facecolor=self.DARK_BG)
         if self.fig.canvas.manager is not None:
             self.fig.canvas.manager.set_window_title(f"TCF Viewer - {self.tcf_path.name}")
 
-        # Main axes for views - adjusted layout for colorbars
-        self.ax_xy = self.fig.add_axes((0.05, 0.28, 0.38, 0.52), facecolor=self.DARK_FG)
-        self.ax_xz = self.fig.add_axes((0.50, 0.53, 0.20, 0.27), facecolor=self.DARK_FG)
-        self.ax_yz = self.fig.add_axes((0.50, 0.28, 0.20, 0.22), facecolor=self.DARK_FG)
-        self.ax_hist = self.fig.add_axes((0.75, 0.28, 0.20, 0.52), facecolor=self.DARK_FG)
+        # Main axes for views - organized layout with proper spacing
+        # XY view (main view, left side)
+        self.ax_xy = self.fig.add_axes((0.05, 0.25, 0.38, 0.55), facecolor=self.DARK_FG)
+        # XZ view (top right orthogonal)
+        self.ax_xz = self.fig.add_axes((0.50, 0.54, 0.20, 0.26), facecolor=self.DARK_FG)
+        # YZ view (bottom right orthogonal)
+        self.ax_yz = self.fig.add_axes((0.50, 0.25, 0.20, 0.26), facecolor=self.DARK_FG)
+        # Histogram (far right)
+        self.ax_hist = self.fig.add_axes((0.75, 0.25, 0.20, 0.55), facecolor=self.DARK_FG)
 
-        # Colorbar axes
-        self.ax_cbar_ht = self.fig.add_axes((0.44, 0.28, 0.015, 0.52), facecolor=self.DARK_FG)
+        # Colorbar axes - positioned next to their respective view groups
+        self.ax_cbar_ht = self.fig.add_axes((0.44, 0.25, 0.015, 0.55), facecolor=self.DARK_FG)
         if self.loader.has_fluorescence:
-            self.ax_cbar_fl = self.fig.add_axes((0.71, 0.28, 0.015, 0.52), facecolor=self.DARK_FG)
+            self.ax_cbar_fl = self.fig.add_axes((0.71, 0.25, 0.015, 0.55), facecolor=self.DARK_FG)
 
         for ax in [self.ax_xy, self.ax_xz, self.ax_yz, self.ax_hist]:
             ax.tick_params(colors="white", labelsize=8)
@@ -230,16 +254,22 @@ class TCFViewer:
         self._setup_measurement_tool()
 
     def _setup_sliders(self) -> None:
-        """Create navigation and contrast sliders."""
+        """Create navigation and contrast sliders with proper spacing."""
         slider_color = "#4a9eff"
+        fl_color = "#50c878"
         data = self.loader.data_3d
         z_max = data.shape[0] - 1
         y_max = data.shape[1] - 1
 
-        # Z slider - show in micrometers
+        # Slider layout: stacked vertically in control region (y=0.04 to 0.19)
+        slider_h = 0.022
+        slider_gap = 0.008
+
+        # Z slider - show in micrometers (top slider)
         z_um_max = z_max * self.res_z
-        ax_z = self.fig.add_axes((0.05, 0.18, 0.38, 0.025), facecolor=self.DARK_FG)
-        self.z_slider = Slider(ax_z, "Z (um)", 0, z_um_max,
+        y_pos = 0.17
+        ax_z = self.fig.add_axes((0.05, y_pos, 0.38, slider_h), facecolor=self.DARK_FG)
+        self.z_slider = Slider(ax_z, "Z (μm)", 0, z_um_max,
                                valinit=self.s.current_z * self.res_z,
                                color=slider_color)
         self.z_slider.label.set_color("white")
@@ -247,9 +277,10 @@ class TCFViewer:
         self.z_slider.on_changed(self._on_z_change)
 
         # Y slider - show in micrometers
+        y_pos -= (slider_h + slider_gap)
         y_um_max = y_max * self.res_xy
-        ax_y = self.fig.add_axes((0.05, 0.14, 0.38, 0.025), facecolor=self.DARK_FG)
-        self.y_slider = Slider(ax_y, "Y (um)", 0, y_um_max,
+        ax_y = self.fig.add_axes((0.05, y_pos, 0.38, slider_h), facecolor=self.DARK_FG)
+        self.y_slider = Slider(ax_y, "Y (μm)", 0, y_um_max,
                                valinit=self.s.current_y * self.res_xy,
                                color=slider_color)
         self.y_slider.label.set_color("white")
@@ -257,8 +288,9 @@ class TCFViewer:
         self.y_slider.on_changed(self._on_y_change)
 
         # Contrast slider - show RI values
+        y_pos -= (slider_h + slider_gap)
         data_min, data_max = float(data.min()), float(data.max())
-        ax_c = self.fig.add_axes((0.05, 0.10, 0.38, 0.025), facecolor=self.DARK_FG)
+        ax_c = self.fig.add_axes((0.05, y_pos, 0.38, slider_h), facecolor=self.DARK_FG)
         self.contrast_slider = RangeSlider(ax_c, "RI", data_min, data_max,
                                            valinit=(self.s.vmin, self.s.vmax), color=slider_color)
         self.contrast_slider.label.set_color("white")
@@ -267,43 +299,46 @@ class TCFViewer:
 
         # FL alpha slider (if applicable)
         if self.loader.tcf_info.has_fluorescence:
-            ax_fl = self.fig.add_axes((0.05, 0.06, 0.38, 0.025), facecolor=self.DARK_FG)
-            self.fl_alpha_slider = Slider(ax_fl, "FL alpha", 0, 1, valinit=0.5, color="#50c878")
+            y_pos -= (slider_h + slider_gap)
+            ax_fl = self.fig.add_axes((0.05, y_pos, 0.38, slider_h), facecolor=self.DARK_FG)
+            self.fl_alpha_slider = Slider(ax_fl, "FL Alpha", 0, 1, valinit=0.5, color=fl_color)
             self.fl_alpha_slider.label.set_color("white")
             self.fl_alpha_slider.valtext.set_color("white")
             self.fl_alpha_slider.on_changed(self._on_fl_alpha_change)
 
-        # Timepoint slider
+        # Timepoint slider (right side, only if multiple timepoints)
         if len(self.loader.timepoints) > 1:
-            ax_t = self.fig.add_axes((0.50, 0.18, 0.20, 0.025), facecolor=self.DARK_FG)
-            self.tp_slider = Slider(ax_t, "T", 0, len(self.loader.timepoints) - 1,
+            ax_t = self.fig.add_axes((0.50, 0.17, 0.20, slider_h), facecolor=self.DARK_FG)
+            self.tp_slider = Slider(ax_t, "Time", 0, len(self.loader.timepoints) - 1,
                                     valinit=0, valstep=1, color=slider_color)
             self.tp_slider.label.set_color("white")
             self.tp_slider.valtext.set_color("white")
             self.tp_slider.on_changed(self._on_timepoint_change)
 
     def _setup_buttons(self) -> None:
-        """Create control buttons."""
-        btn_w, btn_h = 0.07, 0.03
+        """Create control buttons with clear, professional labels."""
+        btn_w, btn_h = 0.08, 0.032
         btn_y = 0.92
+        btn_spacing = 0.085
 
+        # Contrast & display controls (top row)
         buttons = [
-            (0.05, "Auto", self._on_auto_contrast),
-            (0.13, "Global", self._on_global_contrast),
-            (0.21, "Reset", self._on_reset),
-            (0.29, "Invert", self._on_invert),
-            (0.37, "Save", self._on_save_slice),
+            (0.05, "Auto [A]", self._on_auto_contrast),
+            (0.05 + btn_spacing, "Global [G]", self._on_global_contrast),
+            (0.05 + btn_spacing * 2, "Reset [R]", self._on_reset),
+            (0.05 + btn_spacing * 3, "Invert [I]", self._on_invert),
+            (0.05 + btn_spacing * 4, "Save [S]", self._on_save_slice),
         ]
 
         if self.loader.tcf_info.has_fluorescence:
-            buttons.append((0.45, "FL +/-", self._on_toggle_fluorescence))
+            buttons.append((0.05 + btn_spacing * 5, "FL [F]", self._on_toggle_fluorescence))
 
-        # Measurement buttons on second row
+        # Measurement tools (second row)
         btn_y2 = 0.88
         meas_buttons = [
-            (0.05, "Distance", self._on_start_distance),
-            (0.13, "Area", self._on_start_area),
-            (0.21, "Clear", self._on_clear_measurements),
+            (0.05, "Dist [D]", self._on_start_distance),
+            (0.05 + btn_spacing, "Area [P]", self._on_start_area),
+            (0.05 + btn_spacing * 2, "Clear [C]", self._on_clear_measurements),
         ]
 
         self._buttons = []
@@ -311,7 +346,7 @@ class TCFViewer:
             ax = self.fig.add_axes((x, btn_y, btn_w, btn_h), facecolor=self.DARK_FG)
             btn = Button(ax, label, color=self.DARK_FG, hovercolor="#3d3d3d")
             btn.label.set_color("white")
-            btn.label.set_fontsize(9)
+            btn.label.set_fontsize(8)
             btn.on_clicked(handler)
             self._buttons.append(btn)
 
@@ -320,24 +355,33 @@ class TCFViewer:
             ax = self.fig.add_axes((x, btn_y2, btn_w, btn_h), facecolor=self.DARK_FG)
             btn = Button(ax, label, color=self.DARK_FG, hovercolor="#3d3d3d")
             btn.label.set_color("white")
-            btn.label.set_fontsize(9)
+            btn.label.set_fontsize(8)
             btn.on_clicked(handler)
             self._buttons.append(btn)
 
-        # Colormap selector
-        ax_cmap = self.fig.add_axes((0.75, 0.06, 0.12, 0.15), facecolor=self.DARK_FG)
+        # Colormap selector (positioned in bottom right area)
+        ax_cmap = self.fig.add_axes((0.75, 0.04, 0.12, 0.16), facecolor=self.DARK_FG)
         self.cmap_radio = RadioButtons(ax_cmap, self.COLORMAPS, active=0)
         for label in self.cmap_radio.labels:
             label.set_color("white")
-            label.set_fontsize(9)
+            label.set_fontsize(8)
         self.cmap_radio.on_clicked(self._on_cmap_change)
 
+        # Colormap label
+        self.fig.text(0.81, 0.205, "Colormap", ha="center", va="bottom",
+                      color="#888888", fontsize=8)
+
     def _setup_info_text(self) -> None:
-        """Create info text display."""
+        """Create info text display and status bar."""
+        # File info header
         self.info_text = self.fig.text(0.5, 0.97, "", ha="center", va="top",
                                        color="white", fontsize=10, family="monospace")
-        self.pixel_text = self.fig.text(0.5, 0.02, "", ha="center", va="bottom",
-                                        color="#888888", fontsize=9, family="monospace")
+        # Status bar at bottom for hover info and measurement status
+        self.pixel_text = self.fig.text(0.5, 0.012, "", ha="center", va="bottom",
+                                        color="#aaaaaa", fontsize=9, family="monospace")
+        # Keyboard hint on far right
+        self.fig.text(0.98, 0.012, "Press Q to quit | Scroll to navigate",
+                      ha="right", va="bottom", color="#666666", fontsize=8)
 
     # =========================================================================
     # Initial Display Setup (called once)
@@ -361,9 +405,9 @@ class TCFViewer:
                                          aspect="equal", extent=extent_xy)
         self._setup_fl_overlay(self.ax_xy, "xy", extent_xy)
         self._setup_crosshairs(self.ax_xy, "xy", x_um, y_um)
-        self.ax_xy.set_xlabel("X (um)", color="white", fontsize=9)
-        self.ax_xy.set_ylabel("Y (um)", color="white", fontsize=9)
-        self._title_xy = self.ax_xy.set_title(f"XY plane at Z = {z_um:.1f} um",
+        self.ax_xy.set_xlabel("X (μm)", color="white", fontsize=9)
+        self.ax_xy.set_ylabel("Y (μm)", color="white", fontsize=9)
+        self._title_xy = self.ax_xy.set_title(f"XY plane at Z = {z_um:.1f} μm",
                                                color="white", fontsize=10)
         self._add_scale_bar(self.ax_xy, extent_xy[1])
 
@@ -374,9 +418,9 @@ class TCFViewer:
                                          aspect="auto", extent=extent_xz)
         self._setup_fl_overlay(self.ax_xz, "xz", extent_xz)
         self._setup_crosshairs(self.ax_xz, "xz", x_um, z_um)
-        self.ax_xz.set_xlabel("X (um)", color="white", fontsize=8)
-        self.ax_xz.set_ylabel("Z (um)", color="white", fontsize=8)
-        self._title_xz = self.ax_xz.set_title(f"XZ at Y = {y_um:.1f} um",
+        self.ax_xz.set_xlabel("X (μm)", color="white", fontsize=8)
+        self.ax_xz.set_ylabel("Z (μm)", color="white", fontsize=8)
+        self._title_xz = self.ax_xz.set_title(f"XZ at Y = {y_um:.1f} μm",
                                                color="white", fontsize=9)
 
         # YZ view
@@ -386,9 +430,9 @@ class TCFViewer:
                                          aspect="auto", extent=extent_yz)
         self._setup_fl_overlay(self.ax_yz, "yz", extent_yz)
         self._setup_crosshairs(self.ax_yz, "yz", y_um, z_um)
-        self.ax_yz.set_xlabel("Y (um)", color="white", fontsize=8)
-        self.ax_yz.set_ylabel("Z (um)", color="white", fontsize=8)
-        self._title_yz = self.ax_yz.set_title(f"YZ at X = {x_um:.1f} um",
+        self.ax_yz.set_xlabel("Y (μm)", color="white", fontsize=8)
+        self.ax_yz.set_ylabel("Z (μm)", color="white", fontsize=8)
+        self._title_yz = self.ax_yz.set_title(f"YZ at X = {x_um:.1f} μm",
                                                color="white", fontsize=9)
 
         # RI Colorbar
@@ -421,7 +465,11 @@ class TCFViewer:
         self._crosshairs[view_id] = {"h": hline, "v": vline}
 
     def _setup_fl_overlay(self, ax, plane: str, extent: list[float]) -> None:
-        """Set up FL overlay image (initially transparent)."""
+        """Set up FL overlay image (initially transparent).
+
+        Always creates the overlay image to ensure toggle works correctly,
+        even if current slice has no FL data (uses zeros in that case).
+        """
         if not self.loader.has_fluorescence:
             return
 
@@ -430,11 +478,13 @@ class TCFViewer:
             return
 
         fl_3d = self.loader.fl_data[ch]
+        ht_shape = self.loader.data_3d.shape
 
         if plane == "xy":
             fl_slice = self._get_fl_xy_slice(fl_3d)
+            # Always create overlay - use zeros if no data for this slice
             if fl_slice is None:
-                return
+                fl_slice = np.zeros((ht_shape[1], ht_shape[2]), dtype=np.float32)
             fl_rgba = self._create_fl_rgba(fl_slice)
             self._im_fl_xy = ax.imshow(fl_rgba, extent=extent, aspect="equal")
             self._im_fl_xy.set_visible(self.s.show_fluorescence)
@@ -470,7 +520,7 @@ class TCFViewer:
         ax.plot([x_start, x_start + scale_bar_um], [y_pos, y_pos],
                 color="white", lw=3, solid_capstyle="butt")
         ax.text(x_start + scale_bar_um / 2, y_pos - fov_um * 0.03,
-                f"{scale_bar_um} um", color="white", ha="center", va="top",
+                f"{scale_bar_um} \u03bcm", color="white", ha="center", va="top",
                 fontsize=9, fontweight="bold")
 
     # =========================================================================
@@ -509,9 +559,9 @@ class TCFViewer:
         self._crosshairs["yz"]["v"].set_xdata([y_um, y_um])
 
         # Update titles (fast - just set_text)
-        self._title_xy.set_text(f"XY plane at Z = {z_um:.1f} um")
-        self._title_xz.set_text(f"XZ at Y = {y_um:.1f} um")
-        self._title_yz.set_text(f"YZ at X = {x_um:.1f} um")
+        self._title_xy.set_text(f"XY plane at Z = {z_um:.1f} μm")
+        self._title_xz.set_text(f"XZ at Y = {y_um:.1f} μm")
+        self._title_yz.set_text(f"YZ at X = {x_um:.1f} μm")
 
         self._update_info_text()
 
@@ -522,11 +572,14 @@ class TCFViewer:
             return
 
         fl_3d = self.loader.fl_data[ch]
+        ht_shape = self.loader.data_3d.shape
 
         if self._im_fl_xy is not None:
             fl_slice = self._get_fl_xy_slice(fl_3d)
-            if fl_slice is not None:
-                self._im_fl_xy.set_data(self._create_fl_rgba(fl_slice))
+            # Use zeros if no FL data for this slice
+            if fl_slice is None:
+                fl_slice = np.zeros((ht_shape[1], ht_shape[2]), dtype=np.float32)
+            self._im_fl_xy.set_data(self._create_fl_rgba(fl_slice))
 
         if self._im_fl_xz is not None:
             fl_slice = self._get_fl_xz_slice(fl_3d)
@@ -581,7 +634,7 @@ class TCFViewer:
 
         parts = [
             f"{info.magnification or '?'}x  NA {info.numerical_aperture or '?'}",
-            f"FOV: {fov_x:.0f} x {fov_y:.0f} x {fov_z:.0f} um",
+            f"FOV: {fov_x:.0f} × {fov_y:.0f} × {fov_z:.0f} μm",
             f"RI: {self._format_ri(self.s.vmin)} - {self._format_ri(self.s.vmax)}",
         ]
 
@@ -710,7 +763,10 @@ class TCFViewer:
             self._update_fl_overlays()
 
         self._update_info_text()
-        print(f"Fluorescence: {'ON' if self.s.show_fluorescence else 'OFF'}")
+
+        # Show status in status bar
+        status = "Fluorescence overlay ON" if self.s.show_fluorescence else "Fluorescence overlay OFF"
+        self.pixel_text.set_text(status)
         self.fig.canvas.draw_idle()
 
     def _on_save_slice(self, event: Event | None = None) -> None:
@@ -720,7 +776,8 @@ class TCFViewer:
         filepath = self.tcf_path.parent / filename
         plt.imsave(filepath, self.loader.data_3d[self.s.current_z], cmap=self._get_cmap(),
                    vmin=self.s.vmin, vmax=self.s.vmax)
-        print(f"Saved: {filepath}")
+        self.pixel_text.set_text(f"Saved: {filename}")
+        self.fig.canvas.draw_idle()
 
     def _on_key(self, event: Event) -> None:
         key = getattr(event, 'key', None)
@@ -827,7 +884,7 @@ class TCFViewer:
                 val = data[self.s.current_z, y_px, x_px]
                 z_um = self.s.current_z * self.res_z
                 self.pixel_text.set_text(
-                    f"Position: ({xdata:.1f}, {ydata:.1f}, {z_um:.1f}) um  |  RI = {self._format_ri(val)}"
+                    f"Position: ({xdata:.1f}, {ydata:.1f}, {z_um:.1f}) μm  |  RI = {self._format_ri(val)}"
                 )
                 self.fig.canvas.draw_idle()
         elif inaxes == self.ax_xz:
@@ -837,7 +894,7 @@ class TCFViewer:
                 val = data[z_px, self.s.current_y, x_px]
                 y_um = self.s.current_y * self.res_xy
                 self.pixel_text.set_text(
-                    f"Position: ({xdata:.1f}, {y_um:.1f}, {ydata:.1f}) um  |  RI = {self._format_ri(val)}"
+                    f"Position: ({xdata:.1f}, {y_um:.1f}, {ydata:.1f}) μm  |  RI = {self._format_ri(val)}"
                 )
                 self.fig.canvas.draw_idle()
 
@@ -847,7 +904,8 @@ class TCFViewer:
         filepath = self.tcf_path.parent / filename
         plt.imsave(filepath, self.loader.data_mip, cmap=self._get_cmap(),
                    vmin=self.s.vmin, vmax=self.s.vmax)
-        print(f"Saved: {filepath}")
+        self.pixel_text.set_text(f"Saved MIP: {filename}")
+        self.fig.canvas.draw_idle()
 
     # =========================================================================
     # Measurement Tool

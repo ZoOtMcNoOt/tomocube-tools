@@ -56,8 +56,13 @@ class SliceViewer:
         print(f"Loading: {self.tcf_path.name}")
 
         with h5py.File(self.tcf_path, "r") as f:
-            # Load HT
-            self.ht_3d: np.ndarray = np.asarray(f["Data/3D/000000"]).astype(np.float32)
+            # Load HT and convert to physical RI units
+            # TCF files store RI as integers scaled by 10000 (e.g., 13300 = 1.3300)
+            raw_ht = np.asarray(f["Data/3D/000000"])
+            if raw_ht.max() > 100:
+                self.ht_3d: np.ndarray = raw_ht.astype(np.float32) / 10000.0
+            else:
+                self.ht_3d: np.ndarray = raw_ht.astype(np.float32)
             print(f"  HT shape: {self.ht_3d.shape}")
 
             # Get resolution info
@@ -125,7 +130,7 @@ class SliceViewer:
         ax.plot([x_start, x_start + scale_bar_um], [y_pos, y_pos],
                 color="white", lw=3, solid_capstyle="butt")
         ax.text(x_start + scale_bar_um / 2, y_pos - fov_um * 0.03,
-                f"{scale_bar_um} um", color="white", ha="center", va="top",
+                f"{scale_bar_um} \u03bcm", color="white", ha="center", va="top",
                 fontsize=9, fontweight="bold")
 
     def _setup_figure(self) -> None:
@@ -146,9 +151,9 @@ class SliceViewer:
         ht_slice = self.ht_3d[self.current_z]
         self._im_ht = self.ax_ht.imshow(ht_slice, cmap="gray", vmin=self.ht_vmin,
                                          vmax=self.ht_vmax, extent=extent)
-        self.ax_ht.set_xlabel("X (um)", color="white", fontsize=9)
-        self.ax_ht.set_ylabel("Y (um)", color="white", fontsize=9)
-        self._title_ht = self.ax_ht.set_title(f"HT at Z = {z_um:.1f} um",
+        self.ax_ht.set_xlabel("X (μm)", color="white", fontsize=9)
+        self.ax_ht.set_ylabel("Y (μm)", color="white", fontsize=9)
+        self._title_ht = self.ax_ht.set_title(f"HT at Z = {z_um:.1f} μm",
                                                color="white", fontsize=10)
         self.ax_ht.tick_params(colors="white", labelsize=8)
         self._add_scale_bar(self.ax_ht, self.fov_x)
@@ -168,8 +173,8 @@ class SliceViewer:
             fl_slice = self.fl_3d[self.current_z]
             self._im_fl = self.ax_fl.imshow(fl_slice, cmap="Greens", vmin=self.fl_vmin,
                                              vmax=self.fl_vmax, extent=extent)
-            self.ax_fl.set_xlabel("X (um)", color="white", fontsize=9)
-            self.ax_fl.set_ylabel("Y (um)", color="white", fontsize=9)
+            self.ax_fl.set_xlabel("X (μm)", color="white", fontsize=9)
+            self.ax_fl.set_ylabel("Y (μm)", color="white", fontsize=9)
             self._title_fl = self.ax_fl.set_title("FL (registered)", color="white", fontsize=10)
             self.ax_fl.tick_params(colors="white", labelsize=8)
             self._add_scale_bar(self.ax_fl, self.fov_x)
@@ -188,8 +193,8 @@ class SliceViewer:
             rgb[:, :, 0] = ht_norm  # Red = HT
             rgb[:, :, 1] = fl_norm  # Green = FL
             self._im_overlay = self.ax_overlay.imshow(rgb, extent=extent)
-            self.ax_overlay.set_xlabel("X (um)", color="white", fontsize=9)
-            self.ax_overlay.set_ylabel("Y (um)", color="white", fontsize=9)
+            self.ax_overlay.set_xlabel("X (μm)", color="white", fontsize=9)
+            self.ax_overlay.set_ylabel("Y (μm)", color="white", fontsize=9)
             self.ax_overlay.set_title("Overlay (R=HT, G=FL)", color="white", fontsize=10)
             self.ax_overlay.tick_params(colors="white", labelsize=8)
             self._add_scale_bar(self.ax_overlay, self.fov_x)
@@ -198,7 +203,7 @@ class SliceViewer:
         z_um_max = (self.ht_3d.shape[0] - 1) * self.res_z
         ax_slider = self.fig.add_axes((0.15, 0.08, 0.7, 0.03), facecolor=self.DARK_FG)
         self.slider = Slider(
-            ax_slider, "Z (um)", 0, z_um_max,
+            ax_slider, "Z (μm)", 0, z_um_max,
             valinit=z_um, color="#4a9eff"
         )
         self.slider.label.set_color("white")
@@ -220,7 +225,7 @@ class SliceViewer:
 
         # Title with physical info
         self.fig.suptitle(
-            f"{self.tcf_path.stem}  |  FOV: {self.fov_x:.0f} x {self.fov_y:.0f} x {self.fov_z:.0f} um",
+            f"{self.tcf_path.stem}  |  FOV: {self.fov_x:.0f} × {self.fov_y:.0f} × {self.fov_z:.0f} μm",
             fontsize=10, color="white"
         )
 
@@ -233,7 +238,7 @@ class SliceViewer:
         # Fast update - use set_data instead of recreating images
         ht_slice = self.ht_3d[self.current_z]
         self._im_ht.set_data(ht_slice)
-        self._title_ht.set_text(f"HT at Z = {z_um_actual:.1f} um")
+        self._title_ht.set_text(f"HT at Z = {z_um_actual:.1f} μm")
 
         if self.has_fl:
             assert self.fl_3d is not None
@@ -242,7 +247,7 @@ class SliceViewer:
 
             has_data = self.fl_z_start <= self.current_z < self.fl_z_end
             self._title_fl.set_text(
-                f"FL {'(registered)' if has_data else '(no data)'} at Z = {z_um_actual:.1f} um"
+                f"FL {'(registered)' if has_data else '(no data)'} at Z = {z_um_actual:.1f} μm"
             )
 
             # Update overlay

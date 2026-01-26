@@ -278,8 +278,9 @@ def _print_help() -> None:
     # TIFF options
     print(f"  {s.YELLOW}{i.BULLET}{s.RESET} {s.BOLD}tiff{s.RESET}")
     print(f"      {s.CYAN}--fl{s.RESET} {s.DIM}<CH>{s.RESET}      Export fluorescence channel (e.g., CH0)")
-    print(f"      {s.CYAN}--16bit{s.RESET}        16-bit output {s.BRIGHT_BLACK}(default){s.RESET}")
-    print(f"      {s.CYAN}--32bit{s.RESET}        32-bit float output")
+    print(f"      {s.CYAN}--32bit{s.RESET}        32-bit float, physical RI values {s.BRIGHT_BLACK}(default){s.RESET}")
+    print(f"      {s.CYAN}--16bit{s.RESET}        16-bit output {s.BRIGHT_BLACK}(requires --normalize){s.RESET}")
+    print(f"      {s.CYAN}--normalize{s.RESET}    Normalize values for visualization")
     print()
     
     # MAT options
@@ -613,12 +614,14 @@ def _convert_tiff(args: list[str]) -> int:
             "python -m tomocube tiff <file.TCF> [output.tiff] [options]",
             [
                 ("--fl", "<channel>", "Export fluorescence channel (e.g., CH0)"),
-                ("--16bit", "", "16-bit unsigned integer output (default)"),
-                ("--32bit", "", "32-bit float output"),
+                ("--16bit", "", "16-bit output (requires --normalize)"),
+                ("--32bit", "", "32-bit float output (default, preserves RI values)"),
+                ("--normalize", "", "Normalize values for visualization (required for 16-bit)"),
             ],
             [
-                ("Export HT data", "python -m tomocube tiff sample.TCF"),
-                ("Export as 32-bit", "python -m tomocube tiff sample.TCF output.tiff --32bit"),
+                ("Export with physical RI values", "python -m tomocube tiff sample.TCF"),
+                ("Export normalized for visualization", "python -m tomocube tiff sample.TCF output.tiff --normalize"),
+                ("Export 16-bit normalized", "python -m tomocube tiff sample.TCF output.tiff --16bit --normalize"),
                 ("Export FL channel", "python -m tomocube tiff sample.TCF fl.tiff --fl CH0"),
             ],
         )
@@ -627,7 +630,8 @@ def _convert_tiff(args: list[str]) -> int:
     tcf_path = parts[0]
     output_path = None
     channel = "ht"
-    bit_depth = 16
+    bit_depth = 32  # Default to 32-bit to preserve physical values
+    normalize = False  # Default to preserving physical RI values
 
     i = 1
     while i < len(parts):
@@ -640,11 +644,19 @@ def _convert_tiff(args: list[str]) -> int:
         elif parts[i] == "--32bit":
             bit_depth = 32
             i += 1
+        elif parts[i] == "--normalize":
+            normalize = True
+            i += 1
         elif not output_path:
             output_path = parts[i]
             i += 1
         else:
             i += 1
+
+    # 16-bit requires normalization
+    if bit_depth == 16 and not normalize:
+        _print_error("--16bit requires --normalize (cannot store RI values 1.33-1.40 in 16-bit without normalization)")
+        return 1
 
     if not output_path:
         output_path = Path(tcf_path).stem + f"_{channel}.tiff"
@@ -656,6 +668,10 @@ def _convert_tiff(args: list[str]) -> int:
     _print_export_header("TIFF Export", tcf_path)
     _print_step(f"Channel: {channel}", "info")
     _print_step(f"Bit depth: {bit_depth}", "info")
+    if normalize:
+        _print_step("Mode: Normalized (0-1 or 0-65535)", "info")
+    else:
+        _print_step("Mode: Physical RI values preserved", "info")
     print()
 
     try:
@@ -663,11 +679,11 @@ def _convert_tiff(args: list[str]) -> int:
             with Spinner("Loading data..."):
                 loader.load_timepoint(0)
             _print_step("Data loaded", "done")
-            
+
             with Spinner("Converting to TIFF..."):
-                result = export_to_tiff(loader, output_path, channel=channel, bit_depth=bit_depth)
+                result = export_to_tiff(loader, output_path, channel=channel, bit_depth=bit_depth, normalize=normalize)
             _print_step("Conversion complete", "done")
-        
+
         print()
         _print_success(str(result))
         return 0

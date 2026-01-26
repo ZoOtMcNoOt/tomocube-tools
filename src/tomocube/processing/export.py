@@ -36,11 +36,18 @@ def export_to_tiff(
         output_path: Output file path (will add .tiff if needed)
         channel: "ht" for holotomography, or FL channel name like "CH0"
         bit_depth: 16 or 32 bit output
-        normalize: If True, normalize to full bit range
+        normalize: If True, normalize to full bit range (good for visualization).
+                   If False with 32-bit, preserves physical RI values.
         compression: TIFF compression ("lzw", "zlib", "none")
 
     Returns:
         Path to the saved TIFF file
+
+    Note:
+        For HT data, physical RI values (e.g., 1.33-1.40) are preserved when
+        using bit_depth=32 with normalize=False. This is recommended for
+        scientific analysis. For 16-bit output, normalization is required
+        to map values to the 0-65535 range.
     """
     try:
         import tifffile
@@ -51,27 +58,33 @@ def export_to_tiff(
     if not output_path.suffix.lower() in (".tif", ".tiff"):
         output_path = output_path.with_suffix(".tiff")
 
-    # Get data
+    # Get data (already in physical RI units for HT)
     if channel.lower() == "ht":
         data = loader.data_3d
-        description = f"HT data from {loader.tcf_path.name}"
+        description = f"HT data from {loader.tcf_path.name} (RI values)"
     else:
         if channel not in loader.fl_data:
             raise ValueError(f"FL channel '{channel}' not found. Available: {list(loader.fl_data.keys())}")
         data = loader.fl_data[channel]
         description = f"FL {channel} from {loader.tcf_path.name}"
 
-    # Normalize and convert
-    if normalize:
+    # Handle conversion based on bit depth and normalization
+    if bit_depth == 32:
+        if normalize:
+            # 32-bit normalized (0-1 range)
+            vmin, vmax = np.percentile(data, [0.1, 99.9])
+            data_out = np.clip((data - vmin) / (vmax - vmin), 0, 1).astype(np.float32)
+            description += " [normalized 0-1]"
+        else:
+            # 32-bit preserving physical values (recommended for scientific use)
+            data_out = data.astype(np.float32)
+            description += f" [physical RI, range {data.min():.4f}-{data.max():.4f}]"
+    elif bit_depth == 16:
+        # 16-bit always requires normalization to map to 0-65535
         vmin, vmax = np.percentile(data, [0.1, 99.9])
         data_norm = np.clip((data - vmin) / (vmax - vmin), 0, 1)
-    else:
-        data_norm = data
-
-    if bit_depth == 16:
         data_out = (data_norm * 65535).astype(np.uint16)
-    elif bit_depth == 32:
-        data_out = data_norm.astype(np.float32)
+        description += f" [normalized, original range {vmin:.4f}-{vmax:.4f}]"
     else:
         raise ValueError(f"bit_depth must be 16 or 32, got {bit_depth}")
 
@@ -116,6 +129,17 @@ def export_to_mat(
 
     Returns:
         Path to the saved MAT file
+
+    Note:
+        HT data is stored in physical refractive index units (e.g., 1.33-1.40).
+        Resolution values are in micrometers (μm).
+
+    Variables saved:
+        - ht_3d: 3D HT volume (Z, Y, X) in physical RI units
+        - ht_mip: Maximum intensity projection
+        - fl_ch0, fl_ch1, ...: FL channels (if include_fl=True)
+        - metadata: File info (if include_metadata=True)
+        - resolution: Spatial resolution in μm (if include_metadata=True)
     """
     try:
         from scipy.io import savemat
@@ -127,6 +151,7 @@ def export_to_mat(
         output_path = output_path.with_suffix(".mat")
 
     # Build data dictionary
+    # HT data is already in physical RI units (e.g., 1.3300 not 13300)
     mat_dict = {
         "ht_3d": loader.data_3d,
         "ht_mip": loader.data_mip,

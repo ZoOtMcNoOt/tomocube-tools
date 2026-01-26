@@ -121,12 +121,14 @@ class TCFFile:
                 float(np.asarray(data_3d.attrs.get(ATTR_RESOLUTION_X, [DEFAULT_HT_RES_X]))[0]),
             )
 
-            # RI range
+            # RI range - convert from raw units (e.g., 13300) to physical (1.3300)
             ds = _as_dataset(f[f"{PATH_DATA_3D}/{first_tp}"])
             if ATTR_RI_MIN in ds.attrs:
-                tcf.ri_min = float(np.asarray(ds.attrs[ATTR_RI_MIN])[0])
+                raw_min = float(np.asarray(ds.attrs[ATTR_RI_MIN])[0])
+                tcf.ri_min = raw_min / 10000.0 if raw_min > 100 else raw_min
             if ATTR_RI_MAX in ds.attrs:
-                tcf.ri_max = float(np.asarray(ds.attrs[ATTR_RI_MAX])[0])
+                raw_max = float(np.asarray(ds.attrs[ATTR_RI_MAX])[0])
+                tcf.ri_max = raw_max / 10000.0 if raw_max > 100 else raw_max
 
         # Check for fluorescence
         if PATH_DATA_3D_FL in f:
@@ -365,13 +367,27 @@ class TCFFileLoader:
 
         tp = self.timepoints[idx]
 
-        # Load HT volume
-        self._data_3d = np.asarray(self.file[f"Data/3D/{tp}"])
+        # Load HT volume and convert to physical RI units
+        # TCF files store RI as integers scaled by 10000 (e.g., 13300 = 1.3300)
+        raw_data = np.asarray(self.file[f"Data/3D/{tp}"])
+        if raw_data.dtype in (np.int16, np.int32, np.uint16, np.uint32):
+            # Integer data - convert to physical RI (divide by 10000)
+            self._data_3d = raw_data.astype(np.float32) / 10000.0
+        elif raw_data.max() > 100:
+            # Float data but still in raw units (values like 13300.0)
+            self._data_3d = raw_data.astype(np.float32) / 10000.0
+        else:
+            # Already in physical units
+            self._data_3d = raw_data.astype(np.float32)
 
-        # Load or compute MIP
+        # Load or compute MIP (in physical RI units)
         mip_path = f"Data/2DMIP/{tp}"
         if mip_path in self.file:
-            self._data_mip = np.asarray(self.file[mip_path])
+            raw_mip = np.asarray(self.file[mip_path])
+            if raw_mip.max() > 100:
+                self._data_mip = raw_mip.astype(np.float32) / 10000.0
+            else:
+                self._data_mip = raw_mip.astype(np.float32)
         else:
             self._data_mip = np.max(self._data_3d, axis=0)
 
