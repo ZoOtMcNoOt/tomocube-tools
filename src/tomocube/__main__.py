@@ -324,8 +324,10 @@ def main() -> int:
         print(f"{s.BRIGHT_CYAN}tomocube-tools{s.RESET} {s.DIM}v0.1.0{s.RESET}")
         return 0
 
-    # Join remaining args to handle paths with spaces
-    file_path = " ".join(sys.argv[2:]) if len(sys.argv) > 2 else ""
+    # Get remaining args as list to preserve paths with spaces
+    args_list = sys.argv[2:] if len(sys.argv) > 2 else []
+    # For simple commands that just need a file path (no options)
+    file_path = args_list[0] if args_list else ""
 
     if command == "view":
         from tomocube.viewer import TCFViewer
@@ -360,13 +362,13 @@ def main() -> int:
         return _print_info(file_path)
 
     elif command == "tiff":
-        return _convert_tiff(file_path)
+        return _convert_tiff(args_list)
 
     elif command == "mat":
-        return _convert_mat(file_path)
+        return _convert_mat(args_list)
 
     elif command == "gif":
-        return _convert_gif(file_path)
+        return _convert_gif(args_list)
 
     else:
         _print_error(f"Unknown command: {command}")
@@ -402,12 +404,12 @@ def _print_subcommand_help(name: str, usage: str, options: list[tuple[str, str, 
             print()
 
 
-def _convert_tiff(args: str) -> int:
+def _convert_tiff(args: list[str]) -> int:
     """Convert TCF to TIFF stack."""
     from tomocube.core.file import TCFFileLoader
     from tomocube.processing.export import export_to_tiff
 
-    parts = args.split() if args else []
+    parts = args if args else []
 
     if not parts:
         _print_subcommand_help(
@@ -474,13 +476,13 @@ def _convert_tiff(args: str) -> int:
         return 1
 
 
-def _convert_mat(args: str) -> int:
+def _convert_mat(args: list[str]) -> int:
     """Convert TCF to MATLAB .mat format."""
     from tomocube.core.file import TCFFileLoader
     from tomocube.processing.export import export_to_mat
 
     s = Style
-    parts = args.split() if args else []
+    parts = args if args else []
 
     if not parts:
         _print_subcommand_help(
@@ -542,12 +544,12 @@ def _convert_mat(args: str) -> int:
         return 1
 
 
-def _convert_gif(args: str) -> int:
+def _convert_gif(args: list[str]) -> int:
     """Convert TCF to animated GIF."""
     from tomocube.core.file import TCFFileLoader
     from tomocube.processing.export import export_overlay_gif, export_to_gif
 
-    parts = args.split() if args else []
+    parts = args if args else []
 
     if not parts:
         _print_subcommand_help(
