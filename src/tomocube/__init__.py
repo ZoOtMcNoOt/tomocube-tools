@@ -6,7 +6,7 @@ holotomography data from Tomocube microscopes.
 
 Modules:
     core: File I/O, types, constants, and exceptions
-    processing: FL registration, image normalization, metadata parsing
+    processing: FL registration, image normalization, export
     viewer: Interactive visualization tools
 """
 
@@ -33,11 +33,21 @@ from tomocube.processing import (
     # Metadata
     extract_metadata,
     parse_ini_string,
+    # Export
+    export_to_tiff,
+    export_to_mat,
+    export_to_png_sequence,
+    export_to_gif,
+    export_overlay_gif,
 )
 from tomocube.viewer import (
     TCFViewer,
     SliceViewer,
     FluorescenceMapper,
+    MeasurementTool,
+    DistanceMeasurement,
+    AreaMeasurement,
+    extract_line_profile,
 )
 
 __version__ = "0.1.0"
@@ -61,8 +71,19 @@ __all__ = [
     "compute_overlap_score",
     "extract_metadata",
     "parse_ini_string",
+    # Export
+    "export_to_tiff",
+    "export_to_mat",
+    "export_to_png_sequence",
+    "export_to_gif",
+    "export_overlay_gif",
     # Viewer
     "TCFViewer",
     "SliceViewer",
     "FluorescenceMapper",
+    # Measurements
+    "MeasurementTool",
+    "DistanceMeasurement",
+    "AreaMeasurement",
+    "extract_line_profile",
 ]

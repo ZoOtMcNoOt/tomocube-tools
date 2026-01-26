@@ -21,8 +21,11 @@ Keyboard shortcuts:
     M                    Save MIP as PNG
     I                    Invert colormap
     F                    Toggle fluorescence overlay
+    D                    Distance measurement mode
+    P                    Polygon/area measurement mode
+    C                    Clear all measurements
     1-6                  Switch colormap
-    Escape/Q             Quit
+    Escape/Q             Quit (or cancel measurement)
 """
 
 from __future__ import annotations
@@ -37,13 +40,14 @@ from typing import TYPE_CHECKING
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.figure import Figure
+from matplotlib.image import AxesImage
 from matplotlib.widgets import Button, RadioButtons, RangeSlider, Slider
-from mpl_toolkits.axes_grid1 import make_axes_locatable
 
 from tomocube.core.file import TCFFileLoader
 from tomocube.core.types import ViewerState
 from tomocube.processing.image import normalize_with_bounds
 from tomocube.viewer.components import FluorescenceMapper
+from tomocube.viewer.measurements import MeasurementTool
 
 if TYPE_CHECKING:
     from matplotlib.backend_bases import Event
@@ -60,6 +64,8 @@ class TCFViewer:
     - Scale bars showing physical dimensions
     - Colorbars with refractive index values
     - Fluorescence overlay with intensity scale
+
+    Optimized for responsiveness using set_data() updates.
     """
 
     COLORMAPS = ["gray", "viridis", "inferno", "turbo", "coolwarm", "bone"]
@@ -75,9 +81,24 @@ class TCFViewer:
         self._fl_mapper: FluorescenceMapper | None = None
         self._fig: Figure | None = None
 
-        # Colorbar references (for updating)
-        self._cbar_ht = None
-        self._cbar_fl = None
+        # Image references for fast updates
+        self._im_xy: AxesImage | None = None
+        self._im_xz: AxesImage | None = None
+        self._im_yz: AxesImage | None = None
+        self._im_fl_xy: AxesImage | None = None
+        self._im_fl_xz: AxesImage | None = None
+        self._im_fl_yz: AxesImage | None = None
+
+        # Crosshair references
+        self._crosshairs: dict = {}
+
+        # Title references for updates
+        self._title_xy = None
+        self._title_xz = None
+        self._title_yz = None
+
+        # Measurement tool
+        self._measurement_tool: MeasurementTool | None = None
 
         try:
             self._load_file()
@@ -205,7 +226,8 @@ class TCFViewer:
         self._setup_sliders()
         self._setup_buttons()
         self._setup_info_text()
-        self._update_display()
+        self._initial_display()
+        self._setup_measurement_tool()
 
     def _setup_sliders(self) -> None:
         """Create navigation and contrast sliders."""
@@ -276,9 +298,26 @@ class TCFViewer:
         if self.loader.tcf_info.has_fluorescence:
             buttons.append((0.45, "FL +/-", self._on_toggle_fluorescence))
 
+        # Measurement buttons on second row
+        btn_y2 = 0.88
+        meas_buttons = [
+            (0.05, "Distance", self._on_start_distance),
+            (0.13, "Area", self._on_start_area),
+            (0.21, "Clear", self._on_clear_measurements),
+        ]
+
         self._buttons = []
         for x, label, handler in buttons:
             ax = self.fig.add_axes((x, btn_y, btn_w, btn_h), facecolor=self.DARK_FG)
+            btn = Button(ax, label, color=self.DARK_FG, hovercolor="#3d3d3d")
+            btn.label.set_color("white")
+            btn.label.set_fontsize(9)
+            btn.on_clicked(handler)
+            self._buttons.append(btn)
+
+        # Measurement buttons
+        for x, label, handler in meas_buttons:
+            ax = self.fig.add_axes((x, btn_y2, btn_w, btn_h), facecolor=self.DARK_FG)
             btn = Button(ax, label, color=self.DARK_FG, hovercolor="#3d3d3d")
             btn.label.set_color("white")
             btn.label.set_fontsize(9)
@@ -301,104 +340,130 @@ class TCFViewer:
                                         color="#888888", fontsize=9, family="monospace")
 
     # =========================================================================
-    # Display Update
+    # Initial Display Setup (called once)
     # =========================================================================
 
-    def _update_display(self) -> None:
-        """Update all views with proper scientific visualization."""
+    def _initial_display(self) -> None:
+        """Set up initial display with all static elements."""
         cmap = self._get_cmap()
         data = self.loader.data_3d
         s = self.s
-
-        # Clear axes
-        for ax in [self.ax_xy, self.ax_xz, self.ax_yz, self.ax_hist]:
-            ax.clear()
-        self.ax_cbar_ht.clear()
-        if hasattr(self, 'ax_cbar_fl') and self.ax_cbar_fl is not None:
-            self.ax_cbar_fl.clear()
 
         # Calculate physical positions
         z_um = s.current_z * self.res_z
         y_um = s.current_y * self.res_xy
         x_um = s.current_x * self.res_xy
 
-        # XY view with physical extent
-        xy_slice = data[s.current_z]
+        # XY view
         extent_xy = self._get_extent_xy()
-        im_xy = self.ax_xy.imshow(xy_slice, cmap=cmap, vmin=s.vmin, vmax=s.vmax,
-                                   aspect="equal", extent=extent_xy)
-        if s.show_fluorescence:
-            self._overlay_fl(self.ax_xy, "xy", extent_xy)
-        self._draw_crosshairs_um(self.ax_xy, x_um, y_um)
+        xy_slice = data[s.current_z]
+        self._im_xy = self.ax_xy.imshow(xy_slice, cmap=cmap, vmin=s.vmin, vmax=s.vmax,
+                                         aspect="equal", extent=extent_xy)
+        self._setup_fl_overlay(self.ax_xy, "xy", extent_xy)
+        self._setup_crosshairs(self.ax_xy, "xy", x_um, y_um)
         self.ax_xy.set_xlabel("X (um)", color="white", fontsize=9)
         self.ax_xy.set_ylabel("Y (um)", color="white", fontsize=9)
-        self.ax_xy.set_title(f"XY plane at Z = {z_um:.1f} um", color="white", fontsize=10)
+        self._title_xy = self.ax_xy.set_title(f"XY plane at Z = {z_um:.1f} um",
+                                               color="white", fontsize=10)
         self._add_scale_bar(self.ax_xy, extent_xy[1])
 
-        # XZ view with physical extent
-        xz_slice = data[:, s.current_y, :]
+        # XZ view
         extent_xz = self._get_extent_xz()
-        self.ax_xz.imshow(xz_slice, cmap=cmap, vmin=s.vmin, vmax=s.vmax,
-                          aspect="auto", extent=extent_xz)
-        if s.show_fluorescence:
-            self._overlay_fl(self.ax_xz, "xz", extent_xz)
-        self._draw_crosshairs_um(self.ax_xz, x_um, z_um)
+        xz_slice = data[:, s.current_y, :]
+        self._im_xz = self.ax_xz.imshow(xz_slice, cmap=cmap, vmin=s.vmin, vmax=s.vmax,
+                                         aspect="auto", extent=extent_xz)
+        self._setup_fl_overlay(self.ax_xz, "xz", extent_xz)
+        self._setup_crosshairs(self.ax_xz, "xz", x_um, z_um)
         self.ax_xz.set_xlabel("X (um)", color="white", fontsize=8)
         self.ax_xz.set_ylabel("Z (um)", color="white", fontsize=8)
-        self.ax_xz.set_title(f"XZ at Y = {y_um:.1f} um", color="white", fontsize=9)
+        self._title_xz = self.ax_xz.set_title(f"XZ at Y = {y_um:.1f} um",
+                                               color="white", fontsize=9)
 
-        # YZ view with physical extent
-        yz_slice = data[:, :, s.current_x]
+        # YZ view
         extent_yz = self._get_extent_yz()
-        self.ax_yz.imshow(yz_slice, cmap=cmap, vmin=s.vmin, vmax=s.vmax,
-                          aspect="auto", extent=extent_yz)
-        if s.show_fluorescence:
-            self._overlay_fl(self.ax_yz, "yz", extent_yz)
-        self._draw_crosshairs_um(self.ax_yz, y_um, z_um)
+        yz_slice = data[:, :, s.current_x]
+        self._im_yz = self.ax_yz.imshow(yz_slice, cmap=cmap, vmin=s.vmin, vmax=s.vmax,
+                                         aspect="auto", extent=extent_yz)
+        self._setup_fl_overlay(self.ax_yz, "yz", extent_yz)
+        self._setup_crosshairs(self.ax_yz, "yz", y_um, z_um)
         self.ax_yz.set_xlabel("Y (um)", color="white", fontsize=8)
         self.ax_yz.set_ylabel("Z (um)", color="white", fontsize=8)
-        self.ax_yz.set_title(f"YZ at X = {x_um:.1f} um", color="white", fontsize=9)
+        self._title_yz = self.ax_yz.set_title(f"YZ at X = {x_um:.1f} um",
+                                               color="white", fontsize=9)
 
         # RI Colorbar
         sm = plt.cm.ScalarMappable(cmap=cmap, norm=plt.Normalize(vmin=s.vmin, vmax=s.vmax))
         sm.set_array([])
-        cbar = self.fig.colorbar(sm, cax=self.ax_cbar_ht)
-        cbar.set_label("Refractive Index", color="white", fontsize=9)
-        cbar.ax.tick_params(colors="white", labelsize=8)
+        self._cbar_ht = self.fig.colorbar(sm, cax=self.ax_cbar_ht)
+        self._cbar_ht.set_label("Refractive Index", color="white", fontsize=9)
+        self._cbar_ht.ax.tick_params(colors="white", labelsize=8)
 
-        # Histogram with RI values
-        self.ax_hist.hist(xy_slice.ravel(), bins=100, color="#4a9eff", alpha=0.7)
-        self.ax_hist.axvline(s.vmin, color="#ff6b6b", ls="--", lw=1.5, label=f"min: {s.vmin:.4f}")
-        self.ax_hist.axvline(s.vmax, color="#ff6b6b", ls="--", lw=1.5, label=f"max: {s.vmax:.4f}")
-        self.ax_hist.set_xlabel("Refractive Index", color="white", fontsize=9)
-        self.ax_hist.set_ylabel("Count", color="white", fontsize=9)
-        self.ax_hist.set_title("RI Distribution", color="white", fontsize=10)
-        self.ax_hist.tick_params(colors="white", labelsize=8)
-
-        # FL colorbar (if FL is being displayed)
-        if s.show_fluorescence and hasattr(self, 'ax_cbar_fl') and self.ax_cbar_fl is not None:
+        # FL colorbar placeholder
+        if self.loader.has_fluorescence:
             sm_fl = plt.cm.ScalarMappable(cmap="Greens",
                                           norm=plt.Normalize(vmin=s.fl_vmin, vmax=s.fl_vmax))
             sm_fl.set_array([])
-            cbar_fl = self.fig.colorbar(sm_fl, cax=self.ax_cbar_fl)
-            cbar_fl.set_label("FL Intensity", color="white", fontsize=9)
-            cbar_fl.ax.tick_params(colors="white", labelsize=8)
+            self._cbar_fl = self.fig.colorbar(sm_fl, cax=self.ax_cbar_fl)
+            self._cbar_fl.set_label("FL Intensity", color="white", fontsize=9)
+            self._cbar_fl.ax.tick_params(colors="white", labelsize=8)
+            # Initially hide FL colorbar
+            self.ax_cbar_fl.set_visible(s.show_fluorescence)
+
+        # Initial histogram
+        self._update_histogram(xy_slice)
 
         self._update_info_text()
 
-    def _draw_crosshairs_um(self, ax, x_um: float, y_um: float) -> None:
-        """Draw crosshairs at physical position."""
-        ax.axhline(y=y_um, color="#ff6b6b", lw=0.8, alpha=0.7)
-        ax.axvline(x=x_um, color="#50c878", lw=0.8, alpha=0.7)
+    def _setup_crosshairs(self, ax, view_id: str, x: float, y: float) -> None:
+        """Set up crosshair lines for an axis."""
+        hline = ax.axhline(y=y, color="#ff6b6b", lw=0.8, alpha=0.7)
+        vline = ax.axvline(x=x, color="#50c878", lw=0.8, alpha=0.7)
+        self._crosshairs[view_id] = {"h": hline, "v": vline}
+
+    def _setup_fl_overlay(self, ax, plane: str, extent: list[float]) -> None:
+        """Set up FL overlay image (initially transparent)."""
+        if not self.loader.has_fluorescence:
+            return
+
+        ch = self.s.current_fl_channel
+        if ch is None or ch not in self.loader.fl_data:
+            return
+
+        fl_3d = self.loader.fl_data[ch]
+
+        if plane == "xy":
+            fl_slice = self._get_fl_xy_slice(fl_3d)
+            if fl_slice is None:
+                return
+            fl_rgba = self._create_fl_rgba(fl_slice)
+            self._im_fl_xy = ax.imshow(fl_rgba, extent=extent, aspect="equal")
+            self._im_fl_xy.set_visible(self.s.show_fluorescence)
+        elif plane == "xz":
+            fl_slice = self._get_fl_xz_slice(fl_3d)
+            fl_rgba = self._create_fl_rgba(fl_slice)
+            self._im_fl_xz = ax.imshow(fl_rgba, extent=extent, aspect="auto")
+            self._im_fl_xz.set_visible(self.s.show_fluorescence)
+        else:  # yz
+            fl_slice = self._get_fl_yz_slice(fl_3d)
+            fl_rgba = self._create_fl_rgba(fl_slice)
+            self._im_fl_yz = ax.imshow(fl_rgba, extent=extent, aspect="auto")
+            self._im_fl_yz.set_visible(self.s.show_fluorescence)
+
+    def _create_fl_rgba(self, fl_slice: np.ndarray) -> np.ndarray:
+        """Create RGBA array for FL overlay."""
+        fl_norm = normalize_with_bounds(fl_slice, self.s.fl_vmin, self.s.fl_vmax)
+        fl_rgba = np.zeros((*fl_norm.shape, 4), dtype=np.float32)
+        fl_rgba[:, :, 1] = fl_norm  # Green channel
+        fl_rgba[:, :, 3] = fl_norm * self.s.fl_overlay_alpha
+        return fl_rgba
 
     def _add_scale_bar(self, ax, fov_um: float) -> None:
         """Add a scale bar to the axis."""
-        # Choose appropriate scale bar length (10, 20, 50, or 100 um)
+        scale_bar_um = 10
         for bar_len in [10, 20, 50, 100]:
             if bar_len < fov_um * 0.3:
                 scale_bar_um = bar_len
 
-        # Position in bottom-left corner
         x_start = fov_um * 0.05
         y_pos = fov_um * 0.95
 
@@ -408,12 +473,108 @@ class TCFViewer:
                 f"{scale_bar_um} um", color="white", ha="center", va="top",
                 fontsize=9, fontweight="bold")
 
+    # =========================================================================
+    # Fast Display Update (called on slice changes)
+    # =========================================================================
+
+    def _update_display(self) -> None:
+        """Fast update using set_data() - no clearing/recreating."""
+        data = self.loader.data_3d
+        s = self.s
+
+        # Calculate physical positions
+        z_um = s.current_z * self.res_z
+        y_um = s.current_y * self.res_xy
+        x_um = s.current_x * self.res_xy
+
+        # Update image data (fast)
+        xy_slice = data[s.current_z]
+        xz_slice = data[:, s.current_y, :]
+        yz_slice = data[:, :, s.current_x]
+
+        self._im_xy.set_data(xy_slice)
+        self._im_xz.set_data(xz_slice)
+        self._im_yz.set_data(yz_slice)
+
+        # Update FL overlays if visible
+        if s.show_fluorescence and self.loader.has_fluorescence:
+            self._update_fl_overlays()
+
+        # Update crosshairs (fast - just set ydata/xdata)
+        self._crosshairs["xy"]["h"].set_ydata([y_um, y_um])
+        self._crosshairs["xy"]["v"].set_xdata([x_um, x_um])
+        self._crosshairs["xz"]["h"].set_ydata([z_um, z_um])
+        self._crosshairs["xz"]["v"].set_xdata([x_um, x_um])
+        self._crosshairs["yz"]["h"].set_ydata([z_um, z_um])
+        self._crosshairs["yz"]["v"].set_xdata([y_um, y_um])
+
+        # Update titles (fast - just set_text)
+        self._title_xy.set_text(f"XY plane at Z = {z_um:.1f} um")
+        self._title_xz.set_text(f"XZ at Y = {y_um:.1f} um")
+        self._title_yz.set_text(f"YZ at X = {x_um:.1f} um")
+
+        self._update_info_text()
+
+    def _update_fl_overlays(self) -> None:
+        """Update FL overlay data."""
+        ch = self.s.current_fl_channel
+        if ch is None or ch not in self.loader.fl_data:
+            return
+
+        fl_3d = self.loader.fl_data[ch]
+
+        if self._im_fl_xy is not None:
+            fl_slice = self._get_fl_xy_slice(fl_3d)
+            if fl_slice is not None:
+                self._im_fl_xy.set_data(self._create_fl_rgba(fl_slice))
+
+        if self._im_fl_xz is not None:
+            fl_slice = self._get_fl_xz_slice(fl_3d)
+            self._im_fl_xz.set_data(self._create_fl_rgba(fl_slice))
+
+        if self._im_fl_yz is not None:
+            fl_slice = self._get_fl_yz_slice(fl_3d)
+            self._im_fl_yz.set_data(self._create_fl_rgba(fl_slice))
+
+    def _update_contrast(self) -> None:
+        """Update contrast/colormap without redrawing everything."""
+        s = self.s
+        cmap = self._get_cmap()
+
+        # Update HT images
+        self._im_xy.set_clim(s.vmin, s.vmax)
+        self._im_xy.set_cmap(cmap)
+        self._im_xz.set_clim(s.vmin, s.vmax)
+        self._im_xz.set_cmap(cmap)
+        self._im_yz.set_clim(s.vmin, s.vmax)
+        self._im_yz.set_cmap(cmap)
+
+        # Update colorbar
+        self._cbar_ht.mappable.set_clim(s.vmin, s.vmax)
+        self._cbar_ht.mappable.set_cmap(cmap)
+
+        # Update histogram
+        xy_slice = self.loader.data_3d[s.current_z]
+        self._update_histogram(xy_slice)
+
+        self._update_info_text()
+
+    def _update_histogram(self, xy_slice: np.ndarray) -> None:
+        """Update histogram display."""
+        self.ax_hist.clear()
+        self.ax_hist.hist(xy_slice.ravel(), bins=100, color="#4a9eff", alpha=0.7)
+        self.ax_hist.axvline(self.s.vmin, color="#ff6b6b", ls="--", lw=1.5)
+        self.ax_hist.axvline(self.s.vmax, color="#ff6b6b", ls="--", lw=1.5)
+        self.ax_hist.set_xlabel("Refractive Index", color="white", fontsize=9)
+        self.ax_hist.set_ylabel("Count", color="white", fontsize=9)
+        self.ax_hist.set_title("RI Distribution", color="white", fontsize=10)
+        self.ax_hist.tick_params(colors="white", labelsize=8)
+
     def _update_info_text(self) -> None:
         """Update the info text display with physical units."""
         info = self.loader.tcf_info
         data = self.loader.data_3d
 
-        # Physical dimensions
         fov_x = data.shape[2] * self.res_xy
         fov_y = data.shape[1] * self.res_xy
         fov_z = data.shape[0] * self.res_z
@@ -430,34 +591,8 @@ class TCFViewer:
         self.info_text.set_text("  |  ".join(parts))
 
     # =========================================================================
-    # Fluorescence Overlay
+    # Fluorescence Helpers
     # =========================================================================
-
-    def _overlay_fl(self, ax, plane: str, extent: list[float]) -> None:
-        """Overlay fluorescence on the given axis with proper extent."""
-        ch = self.s.current_fl_channel
-        if ch is None or ch not in self.loader.fl_data:
-            return
-
-        fl_3d = self.loader.fl_data[ch]
-        ht_shape = self.loader.data_3d.shape
-
-        if plane == "xy":
-            fl_slice = self._get_fl_xy_slice(fl_3d)
-            if fl_slice is None:
-                return
-        elif plane == "xz":
-            fl_slice = self._get_fl_xz_slice(fl_3d)
-        else:  # yz
-            fl_slice = self._get_fl_yz_slice(fl_3d)
-
-        # Normalize and create RGBA overlay
-        fl_norm = normalize_with_bounds(fl_slice, self.s.fl_vmin, self.s.fl_vmax)
-        fl_rgba = np.zeros((*fl_norm.shape, 4))
-        fl_rgba[:, :, 1] = fl_norm  # Green channel
-        fl_rgba[:, :, 3] = fl_norm * self.s.fl_overlay_alpha
-
-        ax.imshow(fl_rgba, extent=extent, aspect="auto" if plane != "xy" else "equal")
 
     def _get_fl_xy_slice(self, fl_3d: np.ndarray) -> np.ndarray | None:
         if self._fl_mapper is None:
@@ -504,13 +639,13 @@ class TCFViewer:
     def _on_contrast_change(self, val: tuple[float, float]) -> None:
         if val[0] <= val[1]:
             self.s.vmin, self.s.vmax = val
-            self._update_display()
+            self._update_contrast()
             self.fig.canvas.draw_idle()
 
     def _on_fl_alpha_change(self, val: float) -> None:
         self.s.fl_overlay_alpha = val
         if self.s.show_fluorescence:
-            self._update_display()
+            self._update_fl_overlays()
             self.fig.canvas.draw_idle()
 
     def _on_timepoint_change(self, val: float) -> None:
@@ -529,7 +664,7 @@ class TCFViewer:
         if label is None:
             return
         self.s.colormap = label
-        self._update_display()
+        self._update_contrast()
         self.fig.canvas.draw_idle()
 
     def _on_auto_contrast(self, event: Event | None = None) -> None:
@@ -553,13 +688,29 @@ class TCFViewer:
 
     def _on_invert(self, event: Event | None = None) -> None:
         self.s.invert_cmap = not self.s.invert_cmap
-        self._update_display()
+        self._update_contrast()
         self.fig.canvas.draw_idle()
 
     def _on_toggle_fluorescence(self, event: Event | None = None) -> None:
         self.s.show_fluorescence = not self.s.show_fluorescence
+
+        # Toggle visibility of FL overlays
+        if self._im_fl_xy is not None:
+            self._im_fl_xy.set_visible(self.s.show_fluorescence)
+        if self._im_fl_xz is not None:
+            self._im_fl_xz.set_visible(self.s.show_fluorescence)
+        if self._im_fl_yz is not None:
+            self._im_fl_yz.set_visible(self.s.show_fluorescence)
+
+        # Toggle FL colorbar visibility
+        if hasattr(self, 'ax_cbar_fl'):
+            self.ax_cbar_fl.set_visible(self.s.show_fluorescence)
+
+        if self.s.show_fluorescence:
+            self._update_fl_overlays()
+
+        self._update_info_text()
         print(f"Fluorescence: {'ON' if self.s.show_fluorescence else 'OFF'}")
-        self._update_display()
         self.fig.canvas.draw_idle()
 
     def _on_save_slice(self, event: Event | None = None) -> None:
@@ -599,13 +750,23 @@ class TCFViewer:
             self._on_save_mip()
         elif key == "f" and self.loader.tcf_info.has_fluorescence:
             self._on_toggle_fluorescence()
+        elif key == "d":
+            self._on_start_distance()
+        elif key == "p":
+            self._on_start_area()
+        elif key == "c":
+            self._on_clear_measurements()
         elif key in ("q", "escape"):
-            plt.close(self.fig)
+            # Cancel measurement first if active, otherwise quit
+            if self._measurement_tool and self._measurement_tool._mode:
+                self._measurement_tool.cancel()
+            else:
+                plt.close(self.fig)
         elif key in "123456":
             idx = int(key) - 1
             if idx < len(self.COLORMAPS):
                 self.s.colormap = self.COLORMAPS[idx]
-                self._update_display()
+                self._update_contrast()
                 self.fig.canvas.draw_idle()
 
     def _on_scroll(self, event: Event) -> None:
@@ -633,7 +794,6 @@ class TCFViewer:
         shape = self.loader.data_3d.shape
 
         if inaxes == self.ax_xy:
-            # xdata and ydata are in micrometers
             self.s.current_x = int(np.clip(xdata / self.res_xy, 0, shape[2] - 1))
             self.s.current_y = int(np.clip(ydata / self.res_xy, 0, shape[1] - 1))
             self.y_slider.set_val(self.s.current_y * self.res_xy)
@@ -688,6 +848,36 @@ class TCFViewer:
         plt.imsave(filepath, self.loader.data_mip, cmap=self._get_cmap(),
                    vmin=self.s.vmin, vmax=self.s.vmax)
         print(f"Saved: {filepath}")
+
+    # =========================================================================
+    # Measurement Tool
+    # =========================================================================
+
+    def _setup_measurement_tool(self) -> None:
+        """Initialize measurement tool for XY view."""
+        self._measurement_tool = MeasurementTool(
+            self.ax_xy, self.fig, status_callback=self._on_measurement_status
+        )
+
+    def _on_measurement_status(self, message: str) -> None:
+        """Handle status updates from measurement tool."""
+        self.pixel_text.set_text(message)
+        self.fig.canvas.draw_idle()
+
+    def _on_start_distance(self, event: Event | None = None) -> None:
+        """Start distance measurement mode."""
+        if self._measurement_tool:
+            self._measurement_tool.start_distance()
+
+    def _on_start_area(self, event: Event | None = None) -> None:
+        """Start area/polygon measurement mode."""
+        if self._measurement_tool:
+            self._measurement_tool.start_area()
+
+    def _on_clear_measurements(self, event: Event | None = None) -> None:
+        """Clear all measurements."""
+        if self._measurement_tool:
+            self._measurement_tool.clear_all()
 
     # =========================================================================
     # Public API

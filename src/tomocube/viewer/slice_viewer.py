@@ -4,6 +4,8 @@ Interactive Slice Viewer for TCF Files.
 Compare HT and FL slices side-by-side with overlay, showing proper
 physical units (micrometers) and scientific visualization.
 
+Optimized for responsive navigation using set_data() updates.
+
 Usage:
     python -m tomocube slice                    # Use default test file
     python -m tomocube slice path/to/file.TCF   # View specific file
@@ -11,6 +13,7 @@ Usage:
 Controls:
     - Slider or arrow keys: Navigate Z slices
     - Home/End: Jump to first/last slice
+    - Q/Escape: Quit
 """
 
 from __future__ import annotations
@@ -21,6 +24,7 @@ from pathlib import Path
 import h5py
 import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib.image import AxesImage
 from matplotlib.widgets import Button, Slider
 
 from tomocube.core.file import load_registration_params
@@ -36,6 +40,14 @@ class SliceViewer:
 
     def __init__(self, tcf_path: str | Path) -> None:
         self.tcf_path = Path(tcf_path)
+
+        # Image references for fast updates
+        self._im_ht: AxesImage | None = None
+        self._im_fl: AxesImage | None = None
+        self._im_overlay: AxesImage | None = None
+        self._title_ht = None
+        self._title_fl = None
+
         self._load_data()
         self._setup_figure()
 
@@ -45,7 +57,7 @@ class SliceViewer:
 
         with h5py.File(self.tcf_path, "r") as f:
             # Load HT
-            self.ht_3d: np.ndarray = np.asarray(f["Data/3D/000000"]).astype(float)
+            self.ht_3d: np.ndarray = np.asarray(f["Data/3D/000000"]).astype(np.float32)
             print(f"  HT shape: {self.ht_3d.shape}")
 
             # Get resolution info
@@ -57,7 +69,7 @@ class SliceViewer:
             self.has_fl = "Data/3DFL/CH0/000000" in f
 
             if self.has_fl:
-                fl_raw: np.ndarray = np.asarray(f["Data/3DFL/CH0/000000"]).astype(float)
+                fl_raw: np.ndarray = np.asarray(f["Data/3DFL/CH0/000000"]).astype(np.float32)
                 params = load_registration_params(f)
                 print(f"  FL shape: {fl_raw.shape}")
 
@@ -99,13 +111,11 @@ class SliceViewer:
 
     def _add_scale_bar(self, ax, fov_um: float) -> None:
         """Add a scale bar to the axis."""
-        # Choose appropriate scale bar length (10, 20, 50, or 100 um)
         scale_bar_um = 10
         for bar_len in [10, 20, 50, 100]:
             if bar_len < fov_um * 0.3:
                 scale_bar_um = bar_len
 
-        # Position in bottom-left corner
         x_start = fov_um * 0.05
         y_pos = fov_um * 0.95
 
@@ -131,16 +141,17 @@ class SliceViewer:
         self.ax_ht_cbar = self.fig.add_axes((0.31 if self.has_fl else 0.87, 0.25, 0.015, 0.55))
 
         ht_slice = self.ht_3d[self.current_z]
-        self.im_ht = self.ax_ht.imshow(ht_slice, cmap="gray", vmin=self.ht_vmin,
-                                        vmax=self.ht_vmax, extent=extent)
+        self._im_ht = self.ax_ht.imshow(ht_slice, cmap="gray", vmin=self.ht_vmin,
+                                         vmax=self.ht_vmax, extent=extent)
         self.ax_ht.set_xlabel("X (um)", color="white", fontsize=9)
         self.ax_ht.set_ylabel("Y (um)", color="white", fontsize=9)
-        self.ax_ht.set_title(f"HT at Z = {z_um:.1f} um", color="white", fontsize=10)
+        self._title_ht = self.ax_ht.set_title(f"HT at Z = {z_um:.1f} um",
+                                               color="white", fontsize=10)
         self.ax_ht.tick_params(colors="white", labelsize=8)
         self._add_scale_bar(self.ax_ht, self.fov_x)
 
         # HT colorbar
-        cbar_ht = self.fig.colorbar(self.im_ht, cax=self.ax_ht_cbar)
+        cbar_ht = self.fig.colorbar(self._im_ht, cax=self.ax_ht_cbar)
         cbar_ht.set_label("RI", color="white", fontsize=9)
         cbar_ht.ax.tick_params(colors="white", labelsize=8)
 
@@ -152,16 +163,16 @@ class SliceViewer:
             self.ax_fl_cbar = self.fig.add_axes((0.63, 0.25, 0.015, 0.55))
 
             fl_slice = self.fl_3d[self.current_z]
-            self.im_fl = self.ax_fl.imshow(fl_slice, cmap="Greens", vmin=self.fl_vmin,
-                                            vmax=self.fl_vmax, extent=extent)
+            self._im_fl = self.ax_fl.imshow(fl_slice, cmap="Greens", vmin=self.fl_vmin,
+                                             vmax=self.fl_vmax, extent=extent)
             self.ax_fl.set_xlabel("X (um)", color="white", fontsize=9)
             self.ax_fl.set_ylabel("Y (um)", color="white", fontsize=9)
-            self.ax_fl.set_title("FL (registered)", color="white", fontsize=10)
+            self._title_fl = self.ax_fl.set_title("FL (registered)", color="white", fontsize=10)
             self.ax_fl.tick_params(colors="white", labelsize=8)
             self._add_scale_bar(self.ax_fl, self.fov_x)
 
             # FL colorbar
-            cbar_fl = self.fig.colorbar(self.im_fl, cax=self.ax_fl_cbar)
+            cbar_fl = self.fig.colorbar(self._im_fl, cax=self.ax_fl_cbar)
             cbar_fl.set_label("Intensity", color="white", fontsize=9)
             cbar_fl.ax.tick_params(colors="white", labelsize=8)
 
@@ -170,10 +181,10 @@ class SliceViewer:
 
             ht_norm = normalize_with_bounds(ht_slice, self.ht_vmin, self.ht_vmax)
             fl_norm = normalize_with_bounds(fl_slice, self.fl_vmin, self.fl_vmax)
-            rgb = np.zeros((*ht_norm.shape, 3))
+            rgb = np.zeros((*ht_norm.shape, 3), dtype=np.float32)
             rgb[:, :, 0] = ht_norm  # Red = HT
             rgb[:, :, 1] = fl_norm  # Green = FL
-            self.im_overlay = self.ax_overlay.imshow(rgb, extent=extent)
+            self._im_overlay = self.ax_overlay.imshow(rgb, extent=extent)
             self.ax_overlay.set_xlabel("X (um)", color="white", fontsize=9)
             self.ax_overlay.set_ylabel("Y (um)", color="white", fontsize=9)
             self.ax_overlay.set_title("Overlay (R=HT, G=FL)", color="white", fontsize=10)
@@ -211,33 +222,33 @@ class SliceViewer:
         )
 
     def _update_slice(self, z_um: float) -> None:
-        """Update displayed slices (z_um is in micrometers)."""
+        """Update displayed slices using set_data() for speed."""
         self.current_z = int(round(z_um / self.res_z))
         self.current_z = np.clip(self.current_z, 0, self.ht_3d.shape[0] - 1)
         z_um_actual = self.current_z * self.res_z
 
+        # Fast update - use set_data instead of recreating images
         ht_slice = self.ht_3d[self.current_z]
-        self.im_ht.set_data(ht_slice)
-        self.ax_ht.set_title(f"HT at Z = {z_um_actual:.1f} um", color="white", fontsize=10)
+        self._im_ht.set_data(ht_slice)
+        self._title_ht.set_text(f"HT at Z = {z_um_actual:.1f} um")
 
         if self.has_fl:
             assert self.fl_3d is not None
             fl_slice = self.fl_3d[self.current_z]
-            self.im_fl.set_data(fl_slice)
+            self._im_fl.set_data(fl_slice)
 
             has_data = self.fl_z_start <= self.current_z < self.fl_z_end
-            self.ax_fl.set_title(
-                f"FL {'(registered)' if has_data else '(no data)'} at Z = {z_um_actual:.1f} um",
-                color="white", fontsize=10
+            self._title_fl.set_text(
+                f"FL {'(registered)' if has_data else '(no data)'} at Z = {z_um_actual:.1f} um"
             )
 
             # Update overlay
             ht_norm = normalize_with_bounds(ht_slice, self.ht_vmin, self.ht_vmax)
             fl_norm = normalize_with_bounds(fl_slice, self.fl_vmin, self.fl_vmax)
-            rgb = np.zeros((*ht_norm.shape, 3))
+            rgb = np.zeros((*ht_norm.shape, 3), dtype=np.float32)
             rgb[:, :, 0] = ht_norm
             rgb[:, :, 1] = fl_norm
-            self.im_overlay.set_data(rgb)
+            self._im_overlay.set_data(rgb)
 
         self.fig.canvas.draw_idle()
 
