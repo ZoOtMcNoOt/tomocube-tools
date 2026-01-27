@@ -15,8 +15,8 @@ dependencies = [
 
 [project.optional-dependencies]
 matlab = ["hdf5storage"]
-3d = ["napari[all]>=0.4.19", "pyvista>=0.43"]
-all = ["hdf5storage", "napari[all]>=0.4.19", "pyvista>=0.43"]
+3d = ["napari[all]>=0.4.19"]
+all = ["hdf5storage", "napari[all]>=0.4.19"]
 
 [tool.pyright]
 pythonVersion = "3.10"

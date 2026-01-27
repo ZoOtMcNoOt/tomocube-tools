@@ -1250,37 +1250,51 @@ def _convert_gif(args: list[str]) -> int:
 
 
 def _view_3d(args: list[str]) -> int:
-    """Launch 3D volume viewer."""
+    """Launch 3D volume viewer using napari."""
     s = Style
-    i = Icons
 
     if not args:
         _print_error("Missing file path")
-        print(f"  Usage: python -m tomocube view3d <file.TCF> [--backend napari|pyvista]")
+        print(f"  Usage: python -m tomocube view3d <file.TCF> [options]")
         print()
         print(f"  {s.BRIGHT_BLACK}Options:{s.RESET}")
-        print(f"    {s.CYAN}--backend{s.RESET}    Viewer backend: {s.DIM}napari{s.RESET} (default) or {s.DIM}pyvista{s.RESET}")
+        print(f"    {s.CYAN}--slices{s.RESET}      Start in 2D slice mode (use slider to navigate Z)")
+        print(f"    {s.CYAN}--render{s.RESET}      Rendering mode: mip, attenuated_mip, minip, average")
+        print(f"    {s.CYAN}--screenshot{s.RESET}  Save screenshot to file")
         print()
-        print(f"  {s.BRIGHT_BLACK}Install 3D dependencies:{s.RESET}")
+        print(f"  {s.BRIGHT_BLACK}Examples:{s.RESET}")
+        print(f"    {s.DIM}python -m tomocube view3d sample.TCF{s.RESET}")
+        print(f"    {s.DIM}python -m tomocube view3d sample.TCF --slices{s.RESET}")
+        print(f"    {s.DIM}python -m tomocube view3d sample.TCF --render attenuated_mip{s.RESET}")
+        print(f"    {s.DIM}python -m tomocube view3d sample.TCF --screenshot output.png{s.RESET}")
+        print()
+        print(f"  {s.BRIGHT_BLACK}Install dependencies:{s.RESET}")
         print(f"    {s.DIM}pip install 'tomocube-tools[3d]'{s.RESET}")
         print()
         return 1
 
     parts = args if args else []
     tcf_path = parts[0]
-    backend = "napari"
+    show_slices = False
+    rendering = "mip"
+    screenshot = None
 
     idx = 1
     while idx < len(parts):
-        if parts[idx] == "--backend" and idx + 1 < len(parts):
-            backend = parts[idx + 1].lower()
+        arg = parts[idx]
+        if arg == "--slices":
+            show_slices = True
+            idx += 1
+        elif arg == "--render" and idx + 1 < len(parts):
+            rendering = parts[idx + 1].lower()
+            if rendering not in ("mip", "attenuated_mip", "minip", "average"):
+                _print_error(f"Invalid render mode: {rendering}")
+                print(f"  Valid modes: mip, attenuated_mip, minip, average")
+                return 1
             idx += 2
-        elif parts[idx] == "--pyvista":
-            backend = "pyvista"
-            idx += 1
-        elif parts[idx] == "--napari":
-            backend = "napari"
-            idx += 1
+        elif arg == "--screenshot" and idx + 1 < len(parts):
+            screenshot = parts[idx + 1]
+            idx += 2
         else:
             idx += 1
 
@@ -1288,21 +1302,32 @@ def _view_3d(args: list[str]) -> int:
         _print_error(f"File not found: {tcf_path}")
         return 1
 
+    mode = "2D slices" if show_slices else "3D volume"
+    
     print()
     print(f"  {s.BRIGHT_CYAN}{Icons.CUBE}{s.RESET} {s.BOLD}3D Volume Viewer{s.RESET}")
     print(f"  {s.BRIGHT_BLACK}{'─' * 50}{s.RESET}")
-    print(f"  {s.DIM}File:{s.RESET}    {Path(tcf_path).name}")
-    print(f"  {s.DIM}Backend:{s.RESET} {backend}")
+    print(f"  {s.DIM}File:{s.RESET}      {Path(tcf_path).name}")
+    print(f"  {s.DIM}Mode:{s.RESET}      {mode}")
+    print(f"  {s.DIM}Rendering:{s.RESET} {rendering}")
+    if screenshot:
+        print(f"  {s.DIM}Screenshot:{s.RESET} {screenshot}")
     print()
 
     try:
         from tomocube.viewer.viewer_3d import view_3d
-        view_3d(tcf_path, backend=backend)
+        
+        view_3d(
+            tcf_path,
+            show_slices=show_slices,
+            rendering=rendering,
+            screenshot=screenshot,
+        )
         return 0
     except ImportError as e:
         _print_error(str(e))
         print()
-        print(f"  {s.BRIGHT_BLACK}To install 3D viewer dependencies:{s.RESET}")
+        print(f"  {s.BRIGHT_BLACK}To install 3D viewer:{s.RESET}")
         print(f"    {s.CYAN}pip install 'tomocube-tools[3d]'{s.RESET}")
         print()
         return 1
