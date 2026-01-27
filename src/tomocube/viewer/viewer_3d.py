@@ -901,7 +901,7 @@ def _create_crop_widget(viewer, ht_data: np.ndarray, scale: tuple):
             layout.addWidget(title)
             
             # Description
-            desc = QLabel("Drag slider handles to crop each axis.")
+            desc = QLabel("Drag slider handles to crop each axis (HT only).")
             desc.setStyleSheet("color: #888; font-size: 10px;")
             layout.addWidget(desc)
             
@@ -909,11 +909,10 @@ def _create_crop_widget(viewer, ht_data: np.ndarray, scale: tuple):
             
             z, y, x = ht_data.shape
             
-            # Store original data first
+            # Only store HT layer (RI) - FL layers have different dimensions
             for layer in viewer.layers:
-                if hasattr(layer, 'data') and isinstance(layer.data, np.ndarray):
-                    if layer.data.ndim == 3:
-                        self.full_data[layer.name] = layer.data.copy()
+                if layer.name == "RI" and hasattr(layer, 'data') and isinstance(layer.data, np.ndarray):
+                    self.full_data[layer.name] = layer.data.copy()
             
             # Create range sliders
             self.z_slider = AxisRangeSlider("Z (depth)", z - 1, scale[0], self._apply_crop)
@@ -989,11 +988,10 @@ def _create_clipping_widget(viewer, ht_data: np.ndarray, scale: tuple):
             # Store ranges as (min, max) tuples
             self.clip_ranges = {"x": (0, 0), "y": (0, 0), "z": (0, 0)}
 
-            # Store original data
+            # Only store HT layer (RI) - FL layers have different dimensions
             for layer in viewer.layers:
-                if hasattr(layer, 'data') and isinstance(layer.data, np.ndarray):
-                    if layer.data.ndim == 3:
-                        self.full_data[layer.name] = layer.data.copy()
+                if layer.name == "RI" and hasattr(layer, 'data') and isinstance(layer.data, np.ndarray):
+                    self.full_data[layer.name] = layer.data.copy()
 
             z, y, x = ht_data.shape
             # Store max values for initialization
