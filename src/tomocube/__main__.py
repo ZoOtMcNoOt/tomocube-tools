@@ -524,27 +524,26 @@ def _print_help() -> None:
         # Header row: ▶ + space + title, padded to 28 chars each
         print(f"  {s.BRIGHT_MAGENTA}{i.POINTER_DBL}{s.RESET} {s.BOLD}Visualization{s.RESET}            {s.BRIGHT_BLUE}{i.POINTER_DBL}{s.RESET} {s.BOLD}Information{s.RESET}             {s.BRIGHT_GREEN}{i.POINTER_DBL}{s.RESET} {s.BOLD}Export{s.RESET}")
         # Vertical bar row: │ padded to 28 chars each
-        print(f"  {s.BRIGHT_BLACK}{i.BOX_V}{s.RESET}                          {s.BRIGHT_BLACK}{i.BOX_V}{s.RESET}                         {s.BRIGHT_BLACK}{i.BOX_V}{s.RESET}")
-        # Content row 1: ├─ cmd  desc, padded to 28 chars each
-        print(f"  {s.BRIGHT_BLACK}{i.BOX_L}{i.BOX_H}{s.RESET} {s.CYAN}view{s.RESET}  {s.DIM}3D viewer{s.RESET}         {s.BRIGHT_BLACK}{i.BOX_L}{i.BOX_H}{s.RESET} {s.CYAN}info{s.RESET}  {s.DIM}metadata{s.RESET}         {s.BRIGHT_BLACK}{i.BOX_L}{i.BOX_H}{s.RESET} {s.CYAN}tiff{s.RESET}  {s.DIM}TIFF stack{s.RESET}")
-        # Content row 2: ╰─ cmd  desc, padded to 28 chars each (except last column continues)
-        print(f"  {s.BRIGHT_BLACK}{i.BOX_BL}{i.BOX_H}{s.RESET} {s.CYAN}slice{s.RESET} {s.DIM}comparison{s.RESET}        {s.BRIGHT_BLACK}{i.BOX_BL}{i.BOX_H}{s.RESET} {s.CYAN}help{s.RESET}  {s.DIM}this help{s.RESET}        {s.BRIGHT_BLACK}{i.BOX_L}{i.BOX_H}{s.RESET} {s.CYAN}mat{s.RESET}   {s.DIM}MATLAB .mat{s.RESET}")
-        # Content row 3: 58 spaces (2 + 28 + 28) then ╰─ for col 3
-        print(f"                                                       {s.BRIGHT_BLACK}{i.BOX_BL}{i.BOX_H}{s.RESET} {s.CYAN}gif{s.RESET}   {s.DIM}animation{s.RESET}")
+        print(f"  {s.BRIGHT_BLACK}{i.BOX_V}{s.RESET}                            {s.BRIGHT_BLACK}{i.BOX_V}{s.RESET}                            {s.BRIGHT_BLACK}{i.BOX_V}{s.RESET}")
+        # Content rows
+        print(f"  {s.BRIGHT_BLACK}{i.BOX_L}{i.BOX_H}{s.RESET} {s.CYAN}view{s.RESET}   {s.DIM}slice viewer{s.RESET}       {s.BRIGHT_BLACK}{i.BOX_L}{i.BOX_H}{s.RESET} {s.CYAN}info{s.RESET}  {s.DIM}metadata{s.RESET}           {s.BRIGHT_BLACK}{i.BOX_L}{i.BOX_H}{s.RESET} {s.CYAN}tiff{s.RESET}  {s.DIM}TIFF stack{s.RESET}")
+        print(f"  {s.BRIGHT_BLACK}{i.BOX_L}{i.BOX_H}{s.RESET} {s.CYAN}view3d{s.RESET} {s.DIM}volume render{s.RESET}      {s.BRIGHT_BLACK}{i.BOX_BL}{i.BOX_H}{s.RESET} {s.CYAN}help{s.RESET}  {s.DIM}this help{s.RESET}          {s.BRIGHT_BLACK}{i.BOX_L}{i.BOX_H}{s.RESET} {s.CYAN}mat{s.RESET}   {s.DIM}MATLAB .mat{s.RESET}")
+        print(f"  {s.BRIGHT_BLACK}{i.BOX_BL}{i.BOX_H}{s.RESET} {s.CYAN}slice{s.RESET}  {s.DIM}HT/FL compare{s.RESET}                                   {s.BRIGHT_BLACK}{i.BOX_BL}{i.BOX_H}{s.RESET} {s.CYAN}gif{s.RESET}   {s.DIM}animation{s.RESET}")
     else:
         # Single column for narrow terminals
         print(f"  {s.BRIGHT_MAGENTA}{i.POINTER}{s.RESET} {s.BOLD}Visualization{s.RESET}")
-        print(f"    {s.CYAN}view{s.RESET}   {s.DIM}Interactive 3D orthogonal slice viewer{s.RESET}")
-        print(f"    {s.CYAN}slice{s.RESET}  {s.DIM}Side-by-side HT/FL comparison{s.RESET}")
+        print(f"    {s.CYAN}view{s.RESET}    {s.DIM}Interactive orthogonal slice viewer{s.RESET}")
+        print(f"    {s.CYAN}view3d{s.RESET}  {s.DIM}3D volume rendering (napari/pyvista){s.RESET}")
+        print(f"    {s.CYAN}slice{s.RESET}   {s.DIM}Side-by-side HT/FL comparison{s.RESET}")
         print()
         print(f"  {s.BRIGHT_BLUE}{i.POINTER}{s.RESET} {s.BOLD}Information{s.RESET}")
-        print(f"    {s.CYAN}info{s.RESET}   {s.DIM}Display file metadata & structure{s.RESET}")
-        print(f"    {s.CYAN}help{s.RESET}   {s.DIM}Show this help message{s.RESET}")
+        print(f"    {s.CYAN}info{s.RESET}    {s.DIM}Display file metadata & structure{s.RESET}")
+        print(f"    {s.CYAN}help{s.RESET}    {s.DIM}Show this help message{s.RESET}")
         print()
         print(f"  {s.BRIGHT_GREEN}{i.POINTER}{s.RESET} {s.BOLD}Export{s.RESET}")
-        print(f"    {s.CYAN}tiff{s.RESET}   {s.DIM}Export to multi-page TIFF stack{s.RESET}")
-        print(f"    {s.CYAN}mat{s.RESET}    {s.DIM}Export to MATLAB .mat format{s.RESET}")
-        print(f"    {s.CYAN}gif{s.RESET}    {s.DIM}Create animated GIF{s.RESET}")
+        print(f"    {s.CYAN}tiff{s.RESET}    {s.DIM}Export to multi-page TIFF stack{s.RESET}")
+        print(f"    {s.CYAN}mat{s.RESET}     {s.DIM}Export to MATLAB .mat format{s.RESET}")
+        print(f"    {s.CYAN}gif{s.RESET}     {s.DIM}Create animated GIF{s.RESET}")
     print()
 
     # Options section with styled headers
@@ -663,9 +662,10 @@ def _print_short_usage() -> None:
 
     # Commands in a nice grid
     print(f"  {s.BRIGHT_BLACK}{i.BOX_TL}{i.BOX_H * 26}{i.BOX_T}{i.BOX_H * 26}{i.BOX_TR}{s.RESET}")
-    print(f"  {s.BRIGHT_BLACK}{i.BOX_V}{s.RESET} {s.CYAN}view{s.RESET}  {s.DIM}3D slice viewer{s.RESET}    {s.BRIGHT_BLACK}{i.BOX_V}{s.RESET} {s.CYAN}tiff{s.RESET}  {s.DIM}TIFF export{s.RESET}        {s.BRIGHT_BLACK}{i.BOX_V}{s.RESET}")
-    print(f"  {s.BRIGHT_BLACK}{i.BOX_V}{s.RESET} {s.CYAN}slice{s.RESET} {s.DIM}HT/FL comparison{s.RESET}   {s.BRIGHT_BLACK}{i.BOX_V}{s.RESET} {s.CYAN}mat{s.RESET}   {s.DIM}MATLAB export{s.RESET}      {s.BRIGHT_BLACK}{i.BOX_V}{s.RESET}")
-    print(f"  {s.BRIGHT_BLACK}{i.BOX_V}{s.RESET} {s.CYAN}info{s.RESET}  {s.DIM}File metadata{s.RESET}      {s.BRIGHT_BLACK}{i.BOX_V}{s.RESET} {s.CYAN}gif{s.RESET}   {s.DIM}Animation{s.RESET}          {s.BRIGHT_BLACK}{i.BOX_V}{s.RESET}")
+    print(f"  {s.BRIGHT_BLACK}{i.BOX_V}{s.RESET} {s.CYAN}view{s.RESET}   {s.DIM}slice viewer{s.RESET}      {s.BRIGHT_BLACK}{i.BOX_V}{s.RESET} {s.CYAN}tiff{s.RESET}   {s.DIM}TIFF export{s.RESET}       {s.BRIGHT_BLACK}{i.BOX_V}{s.RESET}")
+    print(f"  {s.BRIGHT_BLACK}{i.BOX_V}{s.RESET} {s.CYAN}view3d{s.RESET} {s.DIM}volume render{s.RESET}     {s.BRIGHT_BLACK}{i.BOX_V}{s.RESET} {s.CYAN}mat{s.RESET}    {s.DIM}MATLAB export{s.RESET}     {s.BRIGHT_BLACK}{i.BOX_V}{s.RESET}")
+    print(f"  {s.BRIGHT_BLACK}{i.BOX_V}{s.RESET} {s.CYAN}slice{s.RESET}  {s.DIM}HT/FL compare{s.RESET}     {s.BRIGHT_BLACK}{i.BOX_V}{s.RESET} {s.CYAN}gif{s.RESET}    {s.DIM}animation{s.RESET}         {s.BRIGHT_BLACK}{i.BOX_V}{s.RESET}")
+    print(f"  {s.BRIGHT_BLACK}{i.BOX_V}{s.RESET} {s.CYAN}info{s.RESET}   {s.DIM}file metadata{s.RESET}     {s.BRIGHT_BLACK}{i.BOX_V}{s.RESET}                          {s.BRIGHT_BLACK}{i.BOX_V}{s.RESET}")
     print(f"  {s.BRIGHT_BLACK}{i.BOX_BL}{i.BOX_H * 26}{i.BOX_B}{i.BOX_H * 26}{i.BOX_BR}{s.RESET}")
     print()
 
@@ -956,6 +956,9 @@ def main() -> int:
     elif command == "gif":
         return _convert_gif(args_list)
 
+    elif command == "view3d":
+        return _view_3d(args_list)
+
     else:
         _print_error(f"Unknown command: {command}")
         _print_short_usage()
@@ -1241,6 +1244,68 @@ def _convert_gif(args: list[str]) -> int:
         print()
         _print_success(str(result))
         return 0
+    except Exception as e:
+        _print_error(str(e))
+        return 1
+
+
+def _view_3d(args: list[str]) -> int:
+    """Launch 3D volume viewer."""
+    s = Style
+    i = Icons
+
+    if not args:
+        _print_error("Missing file path")
+        print(f"  Usage: python -m tomocube view3d <file.TCF> [--backend napari|pyvista]")
+        print()
+        print(f"  {s.BRIGHT_BLACK}Options:{s.RESET}")
+        print(f"    {s.CYAN}--backend{s.RESET}    Viewer backend: {s.DIM}napari{s.RESET} (default) or {s.DIM}pyvista{s.RESET}")
+        print()
+        print(f"  {s.BRIGHT_BLACK}Install 3D dependencies:{s.RESET}")
+        print(f"    {s.DIM}pip install 'tomocube-tools[3d]'{s.RESET}")
+        print()
+        return 1
+
+    parts = args if args else []
+    tcf_path = parts[0]
+    backend = "napari"
+
+    idx = 1
+    while idx < len(parts):
+        if parts[idx] == "--backend" and idx + 1 < len(parts):
+            backend = parts[idx + 1].lower()
+            idx += 2
+        elif parts[idx] == "--pyvista":
+            backend = "pyvista"
+            idx += 1
+        elif parts[idx] == "--napari":
+            backend = "napari"
+            idx += 1
+        else:
+            idx += 1
+
+    if not Path(tcf_path).exists():
+        _print_error(f"File not found: {tcf_path}")
+        return 1
+
+    print()
+    print(f"  {s.BRIGHT_CYAN}{Icons.CUBE}{s.RESET} {s.BOLD}3D Volume Viewer{s.RESET}")
+    print(f"  {s.BRIGHT_BLACK}{'─' * 50}{s.RESET}")
+    print(f"  {s.DIM}File:{s.RESET}    {Path(tcf_path).name}")
+    print(f"  {s.DIM}Backend:{s.RESET} {backend}")
+    print()
+
+    try:
+        from tomocube.viewer.viewer_3d import view_3d
+        view_3d(tcf_path, backend=backend)
+        return 0
+    except ImportError as e:
+        _print_error(str(e))
+        print()
+        print(f"  {s.BRIGHT_BLACK}To install 3D viewer dependencies:{s.RESET}")
+        print(f"    {s.CYAN}pip install 'tomocube-tools[3d]'{s.RESET}")
+        print()
+        return 1
     except Exception as e:
         _print_error(str(e))
         return 1
