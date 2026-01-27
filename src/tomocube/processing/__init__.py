@@ -20,7 +20,15 @@ from tomocube.processing.image import (
     normalize_image,
     normalize_with_bounds,
 )
-from tomocube.processing.metadata import extract_metadata, parse_ini_string
+from tomocube.processing.metadata import (
+    discover_related_metadata,
+    extract_metadata,
+    load_experiment_file,
+    load_profile_file,
+    load_project_file,
+    load_vessel_file,
+    parse_ini_string,
+)
 from tomocube.processing.registration import register_fl_to_ht
 
 __all__ = [
@@ -33,6 +41,11 @@ __all__ = [
     # Metadata
     "extract_metadata",
     "parse_ini_string",
+    "load_profile_file",
+    "load_vessel_file",
+    "load_project_file",
+    "load_experiment_file",
+    "discover_related_metadata",
     # Export
     "export_to_tiff",
     "export_to_mat",

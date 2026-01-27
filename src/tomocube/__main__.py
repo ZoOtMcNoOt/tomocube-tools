@@ -6,12 +6,28 @@ Run 'python -m tomocube help' for usage information.
 
 from __future__ import annotations
 
+import os
+import re
+import shutil
 import sys
-import time
 import threading
+import time
 from pathlib import Path
 
 import h5py
+
+
+def _get_terminal_width() -> int:
+    """Get terminal width, with fallback."""
+    try:
+        return shutil.get_terminal_size().columns
+    except Exception:
+        return 80
+
+
+def _strip_ansi(text: str) -> str:
+    """Remove ANSI escape codes from text."""
+    return re.sub(r'\033\[[0-9;]*m', '', text)
 
 
 class Style:
@@ -22,6 +38,8 @@ class Style:
     DIM = "\033[2m"
     ITALIC = "\033[3m"
     UNDERLINE = "\033[4m"
+    BLINK = "\033[5m"
+    REVERSE = "\033[7m"
 
     # Colors
     BLACK = "\033[30m"
@@ -43,12 +61,33 @@ class Style:
     BRIGHT_CYAN = "\033[96m"
     BRIGHT_WHITE = "\033[97m"
 
-    # Background
+    # Background colors
     BG_BLACK = "\033[40m"
+    BG_RED = "\033[41m"
+    BG_GREEN = "\033[42m"
+    BG_YELLOW = "\033[43m"
     BG_BLUE = "\033[44m"
+    BG_MAGENTA = "\033[45m"
     BG_CYAN = "\033[46m"
+    BG_WHITE = "\033[47m"
+
+    # Bright backgrounds
+    BG_BRIGHT_BLACK = "\033[100m"
+    BG_BRIGHT_BLUE = "\033[104m"
+    BG_BRIGHT_CYAN = "\033[106m"
 
     RESET = "\033[0m"
+
+    # 256-color palette (for gradients)
+    @staticmethod
+    def fg256(n: int) -> str:
+        """Foreground color from 256-color palette."""
+        return f"\033[38;5;{n}m"
+
+    @staticmethod
+    def bg256(n: int) -> str:
+        """Background color from 256-color palette."""
+        return f"\033[48;5;{n}m"
 
     @classmethod
     def disable(cls) -> None:
@@ -56,6 +95,8 @@ class Style:
         for attr in dir(cls):
             if attr.isupper() and not attr.startswith("_"):
                 setattr(cls, attr, "")
+        cls.fg256 = staticmethod(lambda n: "")
+        cls.bg256 = staticmethod(lambda n: "")
 
 
 class Icons:
@@ -64,13 +105,24 @@ class Icons:
     CHECK = "✓"
     CROSS = "✗"
     ARROW = "→"
+    ARROW_RIGHT = "▶"
     BULLET = "●"
     CIRCLE = "○"
     DIAMOND = "◆"
+    DIAMOND_SM = "◇"
     STAR = "★"
     SPARK = "✦"
-    
-    # Box drawing
+    LIGHTNING = "⚡"
+    MICROSCOPE = "🔬"
+    DNA = "🧬"
+    CUBE = "📦"
+    FOLDER = "📁"
+    FILE = "📄"
+    GEAR = "⚙"
+    INFO = "ℹ"
+    WARNING = "⚠"
+
+    # Box drawing - rounded
     BOX_H = "─"
     BOX_V = "│"
     BOX_TL = "╭"
@@ -82,36 +134,68 @@ class Icons:
     BOX_L = "├"
     BOX_R = "┤"
     BOX_X = "┼"
-    
+
+    # Box drawing - heavy
+    BOX_HH = "━"
+    BOX_VH = "┃"
+
     # Double box
     DBL_H = "═"
     DBL_V = "║"
-    
+    DBL_TL = "╔"
+    DBL_TR = "╗"
+    DBL_BL = "╚"
+    DBL_BR = "╝"
+
     # Arrows and pointers
     CHEVRON = "›"
+    CHEVRON_DBL = "»"
     POINTER = "▸"
+    POINTER_DBL = "▶"
     TRIANGLE = "▲"
-    
-    # Progress
+    TRIANGLE_DOWN = "▼"
+    TRIANGLE_RIGHT = "▷"
+
+    # Progress/bars
     BLOCK_FULL = "█"
+    BLOCK_7 = "▉"
+    BLOCK_6 = "▊"
+    BLOCK_5 = "▋"
+    BLOCK_4 = "▌"
+    BLOCK_3 = "▍"
+    BLOCK_2 = "▎"
+    BLOCK_1 = "▏"
     BLOCK_MED = "▓"
     BLOCK_LIGHT = "░"
-    
+
     # Decorative
     DOTS = "···"
     ELLIPSIS = "…"
-    
+    WAVE = "〰"
+    SPARKLE = "✨"
+
     @classmethod
     def disable(cls) -> None:
         """Replace unicode with ASCII fallbacks."""
         cls.CHECK = "+"
         cls.CROSS = "x"
         cls.ARROW = "->"
+        cls.ARROW_RIGHT = ">"
         cls.BULLET = "*"
         cls.CIRCLE = "o"
         cls.DIAMOND = "*"
+        cls.DIAMOND_SM = "o"
         cls.STAR = "*"
         cls.SPARK = "*"
+        cls.LIGHTNING = "!"
+        cls.MICROSCOPE = "[M]"
+        cls.DNA = "[D]"
+        cls.CUBE = "[#]"
+        cls.FOLDER = "[/]"
+        cls.FILE = "[@]"
+        cls.GEAR = "[*]"
+        cls.INFO = "(i)"
+        cls.WARNING = "(!)"
         cls.BOX_H = "-"
         cls.BOX_V = "|"
         cls.BOX_TL = "+"
@@ -123,42 +207,62 @@ class Icons:
         cls.BOX_L = "+"
         cls.BOX_R = "+"
         cls.BOX_X = "+"
+        cls.BOX_HH = "="
+        cls.BOX_VH = "|"
         cls.DBL_H = "="
         cls.DBL_V = "|"
+        cls.DBL_TL = "+"
+        cls.DBL_TR = "+"
+        cls.DBL_BL = "+"
+        cls.DBL_BR = "+"
         cls.CHEVRON = ">"
+        cls.CHEVRON_DBL = ">>"
         cls.POINTER = ">"
+        cls.POINTER_DBL = ">>"
         cls.TRIANGLE = "^"
+        cls.TRIANGLE_DOWN = "v"
+        cls.TRIANGLE_RIGHT = ">"
         cls.BLOCK_FULL = "#"
+        cls.BLOCK_7 = "#"
+        cls.BLOCK_6 = "#"
+        cls.BLOCK_5 = "#"
+        cls.BLOCK_4 = "#"
+        cls.BLOCK_3 = "#"
+        cls.BLOCK_2 = "#"
+        cls.BLOCK_1 = "#"
         cls.BLOCK_MED = "#"
         cls.BLOCK_LIGHT = "."
         cls.DOTS = "..."
         cls.ELLIPSIS = "..."
+        cls.WAVE = "~~~"
+        cls.SPARKLE = "*"
 
 
 class Spinner:
     """Animated spinner for long operations."""
-    
-    FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+
+    # Elegant dot spinner
+    FRAMES = ["⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷"]
     FALLBACK = ["|", "/", "-", "\\"]
-    
+
     def __init__(self, message: str = ""):
         self.message = message
         self._stop = False
         self._thread: threading.Thread | None = None
         self._frames = self.FRAMES if sys.stdout.isatty() else self.FALLBACK
-    
+
     def __enter__(self) -> "Spinner":
         self.start()
         return self
-    
+
     def __exit__(self, *args) -> None:
         self.stop()
-    
+
     def start(self) -> None:
         self._stop = False
         self._thread = threading.Thread(target=self._spin, daemon=True)
         self._thread.start()
-    
+
     def stop(self, success: bool = True) -> None:
         self._stop = True
         if self._thread:
@@ -166,7 +270,7 @@ class Spinner:
         # Clear spinner line and print final status
         sys.stdout.write("\r\033[K")
         sys.stdout.flush()
-    
+
     def _spin(self) -> None:
         s = Style
         i = 0
@@ -178,10 +282,58 @@ class Spinner:
             i += 1
 
 
+class ProgressBar:
+    """Smooth progress bar with percentage."""
+
+    def __init__(self, total: int, width: int = 30, title: str = ""):
+        self.total = total
+        self.width = width
+        self.title = title
+        self.current = 0
+
+    def update(self, current: int) -> None:
+        self.current = current
+        self._draw()
+
+    def _draw(self) -> None:
+        s = Style
+        i = Icons
+        pct = self.current / self.total if self.total > 0 else 0
+        filled = int(self.width * pct)
+        empty = self.width - filled
+
+        # Gradient from cyan to green
+        bar = f"{s.CYAN}{i.BLOCK_FULL * filled}{s.BRIGHT_BLACK}{i.BLOCK_LIGHT * empty}{s.RESET}"
+        pct_str = f"{pct * 100:5.1f}%"
+
+        title_part = f"{self.title} " if self.title else ""
+        sys.stdout.write(f"\r  {s.DIM}{title_part}{s.RESET}{bar} {s.BRIGHT_WHITE}{pct_str}{s.RESET}")
+        sys.stdout.flush()
+
+    def finish(self) -> None:
+        s = Style
+        i = Icons
+        bar = f"{s.GREEN}{i.BLOCK_FULL * self.width}{s.RESET}"
+        title_part = f"{self.title} " if self.title else ""
+        sys.stdout.write(f"\r  {s.DIM}{title_part}{s.RESET}{bar} {s.GREEN}100.0%{s.RESET}\n")
+        sys.stdout.flush()
+
+
 # Disable colors if not a TTY or on Windows without ANSI support
 if not sys.stdout.isatty():
     Style.disable()
     Icons.disable()
+
+# Enable UTF-8 output on Windows
+if sys.platform == "win32":
+    import io
+
+    sys.stdout = io.TextIOWrapper(
+        sys.stdout.buffer, encoding="utf-8", errors="replace"
+    )
+    sys.stderr = io.TextIOWrapper(
+        sys.stderr.buffer, encoding="utf-8", errors="replace"
+    )
 
 
 def _styled(text: str, *styles: str) -> str:
@@ -189,117 +341,256 @@ def _styled(text: str, *styles: str) -> str:
     return "".join(styles) + text + Style.RESET
 
 
-def _box(content: list[str], width: int = 54, title: str = "") -> list[str]:
-    """Create a box around content."""
-    i = Icons
+def _get_content_width() -> int:
+    """Get usable content width (terminal width minus margins)."""
+    return min(_get_terminal_width() - 4, 80)
+
+
+def _gradient_text(text: str, colors: list[int]) -> str:
+    """Apply a gradient effect to text using 256-color palette."""
     s = Style
-    lines = []
-    
-    # Top border with optional title
-    if title:
-        title_str = f" {title} "
-        pad_left = (width - len(title_str) - 2) // 2
-        pad_right = width - len(title_str) - 2 - pad_left
-        lines.append(f"  {s.BRIGHT_BLACK}{i.BOX_TL}{i.BOX_H * pad_left}{s.RESET}{s.BOLD}{title_str}{s.RESET}{s.BRIGHT_BLACK}{i.BOX_H * pad_right}{i.BOX_TR}{s.RESET}")
-    else:
-        lines.append(f"  {s.BRIGHT_BLACK}{i.BOX_TL}{i.BOX_H * width}{i.BOX_TR}{s.RESET}")
-    
-    # Content
-    for line in content:
-        # Strip ANSI codes for length calculation
-        import re
-        clean_line = re.sub(r'\033\[[0-9;]*m', '', line)
-        padding = width - len(clean_line) - 2
-        lines.append(f"  {s.BRIGHT_BLACK}{i.BOX_V}{s.RESET} {line}{' ' * padding}{s.BRIGHT_BLACK}{i.BOX_V}{s.RESET}")
-    
-    # Bottom border
-    lines.append(f"  {s.BRIGHT_BLACK}{i.BOX_BL}{i.BOX_H * width}{i.BOX_BR}{s.RESET}")
-    
-    return lines
+    if not colors:
+        return text
+    result = []
+    for idx, char in enumerate(text):
+        color_idx = int(idx / len(text) * len(colors))
+        color_idx = min(color_idx, len(colors) - 1)
+        result.append(f"{s.fg256(colors[color_idx])}{char}")
+    return "".join(result) + s.RESET
 
 
-def _print_logo() -> None:
+def _horizontal_line(char: str = "─", width: int | None = None, color: str = "") -> str:
+    """Create a horizontal line."""
+    s = Style
+    w = width or _get_content_width()
+    line_color = color or s.BRIGHT_BLACK
+    return f"  {line_color}{char * w}{s.RESET}"
+
+
+def _gradient_line(width: int | None = None) -> str:
+    """Create a gradient horizontal line."""
+    s = Style
+    w = width or _get_content_width()
+    # Cyan to blue gradient
+    colors = [51, 45, 39, 33, 27, 33, 39, 45, 51]
+    segment = w // len(colors)
+    line = ""
+    for color in colors:
+        line += f"{s.fg256(color)}{'━' * segment}"
+    # Fill remaining
+    remaining = w - (segment * len(colors))
+    line += f"{s.fg256(colors[-1])}{'━' * remaining}"
+    return f"  {line}{s.RESET}"
+
+
+class Panel:
+    """A styled panel/card component with responsive width."""
+
+    def __init__(
+        self,
+        title: str = "",
+        icon: str = "",
+        color: str = "",
+        width: int | None = None,
+    ):
+        self.title = title
+        self.icon = icon
+        self.color = color or Style.BRIGHT_CYAN
+        self.width = width or _get_content_width()
+        self.rows: list[tuple[str, str, str]] = []  # (label, value, suffix)
+
+    def add_row(self, label: str, value: str, suffix: str = "") -> "Panel":
+        self.rows.append((label, value, suffix))
+        return self
+
+    def add_divider(self) -> "Panel":
+        self.rows.append(("__divider__", "", ""))
+        return self
+
+    def render(self) -> list[str]:
+        s = Style
+        i = Icons
+        lines = []
+
+        # Header with icon and title
+        if self.title:
+            header = f"  {self.color}{self.icon}{s.RESET} {s.BOLD}{self.title}{s.RESET}"
+            lines.append("")
+            lines.append(header)
+            lines.append(f"  {s.BRIGHT_BLACK}{i.BOX_H * (self.width - 2)}{s.RESET}")
+
+        # Content rows
+        for idx, (label, value, suffix) in enumerate(self.rows):
+            if label == "__divider__":
+                lines.append(f"  {s.BRIGHT_BLACK}{i.BOX_H * (self.width - 2)}{s.RESET}")
+                continue
+
+            is_last = idx == len(self.rows) - 1
+            connector = i.BOX_BL if is_last else i.BOX_L
+
+            # Format the row
+            suffix_str = f" {s.BRIGHT_BLACK}{suffix}{s.RESET}" if suffix else ""
+            lines.append(
+                f"  {s.BRIGHT_BLACK}{connector}{i.BOX_H}{s.RESET} {label:12} {value}{suffix_str}"
+            )
+
+        return lines
+
+    def print(self) -> None:
+        for line in self.render():
+            print(line)
+
+
+def _print_logo(compact: bool = False) -> None:
     """Print the Tomocube Tools logo."""
     s = Style
     i = Icons
-    
+    width = _get_content_width()
+
     print()
-    # Stylized header
-    print(f"  {s.BRIGHT_CYAN}{s.BOLD}{i.DIAMOND} TOMOCUBE{s.RESET} {s.DIM}Tools{s.RESET} {s.BRIGHT_BLACK}v0.1.0{s.RESET}")
-    print(f"  {s.BRIGHT_BLACK}Holotomography data processing{s.RESET}")
-    print()
+
+    if not compact and width >= 60:
+        # Beautiful ASCII art banner
+        logo_lines = [
+            "  ╭─────────────────────────────────────────────────────╮",
+            "  │                                                     │",
+            "  │   ████████╗ ██████╗ ███╗   ███╗ ██████╗             │",
+            "  │   ╚══██╔══╝██╔═══██╗████╗ ████║██╔═══██╗            │",
+            "  │      ██║   ██║   ██║██╔████╔██║██║   ██║            │",
+            "  │      ██║   ██║   ██║██║╚██╔╝██║██║   ██║            │",
+            "  │      ██║   ╚██████╔╝██║ ╚═╝ ██║╚██████╔╝            │",
+            "  │      ╚═╝    ╚═════╝ ╚═╝     ╚═╝ ╚═════╝             │",
+            "  │                                                     │",
+            "  │      ██████╗██╗   ██╗██████╗ ███████╗               │",
+            "  │     ██╔════╝██║   ██║██╔══██╗██╔════╝               │",
+            "  │     ██║     ██║   ██║██████╔╝█████╗                 │",
+            "  │     ██║     ██║   ██║██╔══██╗██╔══╝                 │",
+            "  │     ╚██████╗╚██████╔╝██████╔╝███████╗               │",
+            "  │      ╚═════╝ ╚═════╝ ╚═════╝ ╚══════╝               │",
+            "  │                                                     │",
+            "  ╰─────────────────────────────────────────────────────╯",
+        ]
+        # Apply cyan gradient
+        for idx, line in enumerate(logo_lines):
+            # Gradient from bright cyan at edges to cyan in middle
+            if idx in (0, len(logo_lines) - 1):
+                print(f"{s.BRIGHT_CYAN}{line}{s.RESET}")
+            elif "████" in line or "═══" in line:
+                print(f"{s.CYAN}{line}{s.RESET}")
+            else:
+                print(f"{s.BRIGHT_BLACK}{line}{s.RESET}")
+
+        # Tagline
+        print()
+        tagline = "Holotomography Data Processing Tools"
+        padding = (55 - len(tagline)) // 2
+        print(f"  {s.BRIGHT_BLACK}│{' ' * padding}{s.RESET}{s.DIM}{tagline}{s.RESET}{s.BRIGHT_BLACK}{' ' * (55 - len(tagline) - padding - 2)}│{s.RESET}")
+        print(f"  {s.BRIGHT_BLACK}│{' ' * 20}{s.RESET}{s.BRIGHT_CYAN}v0.1.0{s.RESET}{s.BRIGHT_BLACK}{' ' * 27}│{s.RESET}")
+        print()
+    else:
+        # Compact logo for narrow terminals
+        print(_gradient_line(width))
+        print()
+        print(f"  {s.BRIGHT_CYAN}{s.BOLD}{i.DIAMOND} TOMOCUBE{s.RESET} {s.CYAN}TOOLS{s.RESET}  {s.BRIGHT_BLACK}v0.1.0{s.RESET}")
+        print(f"  {s.DIM}Holotomography data processing{s.RESET}")
+        print()
+        print(_gradient_line(width))
+        print()
 
 
 def _print_help() -> None:
     """Print comprehensive help information."""
     s = Style
     i = Icons
+    width = _get_content_width()
 
     _print_logo()
-    
-    # Usage box
-    print(f"  {s.BOLD}USAGE{s.RESET}")
-    print(f"  {s.BRIGHT_BLACK}{i.BOX_H * 54}{s.RESET}")
-    print(f"  python -m tomocube {s.CYAN}<command>{s.RESET} {s.DIM}[file] [options]{s.RESET}")
+
+    # Usage section with styled box
+    print(f"  {s.BRIGHT_WHITE}{s.BOLD}USAGE{s.RESET}")
+    print(_gradient_line(width))
+    print()
+    print(f"  {s.DIM}${s.RESET} python -m tomocube {s.CYAN}<command>{s.RESET} {s.BRIGHT_BLACK}[file] [options]{s.RESET}")
     print()
 
-    # Commands section with grouped layout
-    print(f"  {s.BOLD}COMMANDS{s.RESET}")
-    print(f"  {s.BRIGHT_BLACK}{i.BOX_H * 54}{s.RESET}")
-    print()
-    
-    # Visualization group
-    print(f"  {s.BRIGHT_MAGENTA}{i.POINTER}{s.RESET} {s.BOLD}Visualization{s.RESET}")
-    print(f"  {s.BRIGHT_BLACK}{i.BOX_V}{s.RESET}")
-    print(f"  {s.BRIGHT_BLACK}{i.BOX_L}{i.BOX_H}{s.RESET} {s.CYAN}view{s.RESET}  {s.DIM}<file>{s.RESET}  {s.BRIGHT_BLACK}{i.ARROW}{s.RESET}  Interactive 3D orthogonal slice viewer")
-    print(f"  {s.BRIGHT_BLACK}{i.BOX_BL}{i.BOX_H}{s.RESET} {s.CYAN}slice{s.RESET} {s.DIM}<file>{s.RESET}  {s.BRIGHT_BLACK}{i.ARROW}{s.RESET}  Side-by-side HT/FL comparison")
-    print()
-    
-    # Information group
-    print(f"  {s.BRIGHT_BLUE}{i.POINTER}{s.RESET} {s.BOLD}Information{s.RESET}")
-    print(f"  {s.BRIGHT_BLACK}{i.BOX_V}{s.RESET}")
-    print(f"  {s.BRIGHT_BLACK}{i.BOX_L}{i.BOX_H}{s.RESET} {s.CYAN}info{s.RESET}  {s.DIM}<file>{s.RESET}  {s.BRIGHT_BLACK}{i.ARROW}{s.RESET}  Display file metadata & structure")
-    print(f"  {s.BRIGHT_BLACK}{i.BOX_BL}{i.BOX_H}{s.RESET} {s.CYAN}help{s.RESET}          {s.BRIGHT_BLACK}{i.ARROW}{s.RESET}  Show this help message")
-    print()
-    
-    # Export group
-    print(f"  {s.BRIGHT_GREEN}{i.POINTER}{s.RESET} {s.BOLD}Export{s.RESET}")
-    print(f"  {s.BRIGHT_BLACK}{i.BOX_V}{s.RESET}")
-    print(f"  {s.BRIGHT_BLACK}{i.BOX_L}{i.BOX_H}{s.RESET} {s.CYAN}tiff{s.RESET}  {s.DIM}<file>{s.RESET}  {s.BRIGHT_BLACK}{i.ARROW}{s.RESET}  Export to multi-page TIFF stack")
-    print(f"  {s.BRIGHT_BLACK}{i.BOX_L}{i.BOX_H}{s.RESET} {s.CYAN}mat{s.RESET}   {s.DIM}<file>{s.RESET}  {s.BRIGHT_BLACK}{i.ARROW}{s.RESET}  Export to MATLAB .mat format")
-    print(f"  {s.BRIGHT_BLACK}{i.BOX_BL}{i.BOX_H}{s.RESET} {s.CYAN}gif{s.RESET}   {s.DIM}<file>{s.RESET}  {s.BRIGHT_BLACK}{i.ARROW}{s.RESET}  Create animated GIF")
+    # Commands section with cards
+    print(f"  {s.BRIGHT_WHITE}{s.BOLD}COMMANDS{s.RESET}")
+    print(_gradient_line(width))
     print()
 
-    # Options section
-    print(f"  {s.BOLD}OPTIONS{s.RESET}")
-    print(f"  {s.BRIGHT_BLACK}{i.BOX_H * 54}{s.RESET}")
+    # Three-column layout for commands if wide enough
+    if width >= 70:
+        # Each column is exactly 28 visible characters
+        # Header row: ▶ + space + title, padded to 28 chars each
+        print(f"  {s.BRIGHT_MAGENTA}{i.POINTER_DBL}{s.RESET} {s.BOLD}Visualization{s.RESET}            {s.BRIGHT_BLUE}{i.POINTER_DBL}{s.RESET} {s.BOLD}Information{s.RESET}             {s.BRIGHT_GREEN}{i.POINTER_DBL}{s.RESET} {s.BOLD}Export{s.RESET}")
+        # Vertical bar row: │ padded to 28 chars each
+        print(f"  {s.BRIGHT_BLACK}{i.BOX_V}{s.RESET}                          {s.BRIGHT_BLACK}{i.BOX_V}{s.RESET}                         {s.BRIGHT_BLACK}{i.BOX_V}{s.RESET}")
+        # Content row 1: ├─ cmd  desc, padded to 28 chars each
+        print(f"  {s.BRIGHT_BLACK}{i.BOX_L}{i.BOX_H}{s.RESET} {s.CYAN}view{s.RESET}  {s.DIM}3D viewer{s.RESET}         {s.BRIGHT_BLACK}{i.BOX_L}{i.BOX_H}{s.RESET} {s.CYAN}info{s.RESET}  {s.DIM}metadata{s.RESET}         {s.BRIGHT_BLACK}{i.BOX_L}{i.BOX_H}{s.RESET} {s.CYAN}tiff{s.RESET}  {s.DIM}TIFF stack{s.RESET}")
+        # Content row 2: ╰─ cmd  desc, padded to 28 chars each (except last column continues)
+        print(f"  {s.BRIGHT_BLACK}{i.BOX_BL}{i.BOX_H}{s.RESET} {s.CYAN}slice{s.RESET} {s.DIM}comparison{s.RESET}        {s.BRIGHT_BLACK}{i.BOX_BL}{i.BOX_H}{s.RESET} {s.CYAN}help{s.RESET}  {s.DIM}this help{s.RESET}        {s.BRIGHT_BLACK}{i.BOX_L}{i.BOX_H}{s.RESET} {s.CYAN}mat{s.RESET}   {s.DIM}MATLAB .mat{s.RESET}")
+        # Content row 3: 58 spaces (2 + 28 + 28) then ╰─ for col 3
+        print(f"                                                       {s.BRIGHT_BLACK}{i.BOX_BL}{i.BOX_H}{s.RESET} {s.CYAN}gif{s.RESET}   {s.DIM}animation{s.RESET}")
+    else:
+        # Single column for narrow terminals
+        print(f"  {s.BRIGHT_MAGENTA}{i.POINTER}{s.RESET} {s.BOLD}Visualization{s.RESET}")
+        print(f"    {s.CYAN}view{s.RESET}   {s.DIM}Interactive 3D orthogonal slice viewer{s.RESET}")
+        print(f"    {s.CYAN}slice{s.RESET}  {s.DIM}Side-by-side HT/FL comparison{s.RESET}")
+        print()
+        print(f"  {s.BRIGHT_BLUE}{i.POINTER}{s.RESET} {s.BOLD}Information{s.RESET}")
+        print(f"    {s.CYAN}info{s.RESET}   {s.DIM}Display file metadata & structure{s.RESET}")
+        print(f"    {s.CYAN}help{s.RESET}   {s.DIM}Show this help message{s.RESET}")
+        print()
+        print(f"  {s.BRIGHT_GREEN}{i.POINTER}{s.RESET} {s.BOLD}Export{s.RESET}")
+        print(f"    {s.CYAN}tiff{s.RESET}   {s.DIM}Export to multi-page TIFF stack{s.RESET}")
+        print(f"    {s.CYAN}mat{s.RESET}    {s.DIM}Export to MATLAB .mat format{s.RESET}")
+        print(f"    {s.CYAN}gif{s.RESET}    {s.DIM}Create animated GIF{s.RESET}")
     print()
-    
-    # TIFF options
-    print(f"  {s.YELLOW}{i.BULLET}{s.RESET} {s.BOLD}tiff{s.RESET}")
-    print(f"      {s.CYAN}--fl{s.RESET} {s.DIM}<CH>{s.RESET}      Export fluorescence channel (e.g., CH0)")
-    print(f"      {s.CYAN}--32bit{s.RESET}        32-bit float, physical RI values {s.BRIGHT_BLACK}(default){s.RESET}")
-    print(f"      {s.CYAN}--16bit{s.RESET}        16-bit output {s.BRIGHT_BLACK}(requires --normalize){s.RESET}")
-    print(f"      {s.CYAN}--normalize{s.RESET}    Normalize values for visualization")
+
+    # Options section with styled headers
+    print(f"  {s.BRIGHT_WHITE}{s.BOLD}OPTIONS{s.RESET}")
+    print(_gradient_line(width))
     print()
-    
+
+    # TIFF options in a nice card (50 visible chars between │ and │)
+    print(f"  {s.YELLOW}{i.SPARK}{s.RESET} {s.BOLD}tiff{s.RESET} {s.BRIGHT_BLACK}─ Export to TIFF stack{s.RESET}")
+    print(f"    {s.BRIGHT_BLACK}{i.BOX_TL}{i.BOX_H * 50}{i.BOX_TR}{s.RESET}")
+    # 50 chars:   --fl <CH>       Export fluorescence channel     
+    print(f"    {s.BRIGHT_BLACK}{i.BOX_V}{s.RESET}  {s.CYAN}--fl{s.RESET} {s.DIM}<CH>{s.RESET}       Export fluorescence channel     {s.BRIGHT_BLACK}{i.BOX_V}{s.RESET}")
+    # 50 chars:   --32bit         32-bit float (default)          
+    print(f"    {s.BRIGHT_BLACK}{i.BOX_V}{s.RESET}  {s.CYAN}--32bit{s.RESET}         32-bit float {s.BRIGHT_BLACK}(default){s.RESET}          {s.BRIGHT_BLACK}{i.BOX_V}{s.RESET}")
+    # 50 chars:   --16bit         16-bit (requires --normalize)   
+    print(f"    {s.BRIGHT_BLACK}{i.BOX_V}{s.RESET}  {s.CYAN}--16bit{s.RESET}         16-bit {s.BRIGHT_BLACK}(requires --normalize){s.RESET}   {s.BRIGHT_BLACK}{i.BOX_V}{s.RESET}")
+    # 50 chars:   --normalize     Normalize for visualization     
+    print(f"    {s.BRIGHT_BLACK}{i.BOX_V}{s.RESET}  {s.CYAN}--normalize{s.RESET}     Normalize for visualization     {s.BRIGHT_BLACK}{i.BOX_V}{s.RESET}")
+    print(f"    {s.BRIGHT_BLACK}{i.BOX_BL}{i.BOX_H * 50}{i.BOX_BR}{s.RESET}")
+    print()
+
     # MAT options
-    print(f"  {s.YELLOW}{i.BULLET}{s.RESET} {s.BOLD}mat{s.RESET}")
-    print(f"      {s.CYAN}--no-fl{s.RESET}        Exclude fluorescence data")
-    print()
-    
-    # GIF options
-    print(f"  {s.YELLOW}{i.BULLET}{s.RESET} {s.BOLD}gif{s.RESET}")
-    print(f"      {s.CYAN}--overlay{s.RESET}      HT+FL overlay animation")
-    print(f"      {s.CYAN}--fps{s.RESET} {s.DIM}<N>{s.RESET}      Frame rate {s.BRIGHT_BLACK}(default: 10){s.RESET}")
-    print(f"      {s.CYAN}--axis{s.RESET} {s.DIM}<z|y|x>{s.RESET} Slice axis {s.BRIGHT_BLACK}(default: z){s.RESET}")
+    print(f"  {s.YELLOW}{i.SPARK}{s.RESET} {s.BOLD}mat{s.RESET} {s.BRIGHT_BLACK}─ Export to MATLAB format{s.RESET}")
+    print(f"    {s.BRIGHT_BLACK}{i.BOX_TL}{i.BOX_H * 50}{i.BOX_TR}{s.RESET}")
+    # 50 chars:   --no-fl         Exclude fluorescence data       
+    print(f"    {s.BRIGHT_BLACK}{i.BOX_V}{s.RESET}  {s.CYAN}--no-fl{s.RESET}         Exclude fluorescence data       {s.BRIGHT_BLACK}{i.BOX_V}{s.RESET}")
+    print(f"    {s.BRIGHT_BLACK}{i.BOX_BL}{i.BOX_H * 50}{i.BOX_BR}{s.RESET}")
     print()
 
-    # Keyboard shortcuts in a nice grid
-    print(f"  {s.BOLD}VIEWER SHORTCUTS{s.RESET}")
-    print(f"  {s.BRIGHT_BLACK}{i.BOX_H * 54}{s.RESET}")
+    # GIF options
+    print(f"  {s.YELLOW}{i.SPARK}{s.RESET} {s.BOLD}gif{s.RESET} {s.BRIGHT_BLACK}─ Create animated GIF{s.RESET}")
+    print(f"    {s.BRIGHT_BLACK}{i.BOX_TL}{i.BOX_H * 50}{i.BOX_TR}{s.RESET}")
+    # 50 chars:   --overlay       HT+FL overlay animation         
+    print(f"    {s.BRIGHT_BLACK}{i.BOX_V}{s.RESET}  {s.CYAN}--overlay{s.RESET}       HT+FL overlay animation         {s.BRIGHT_BLACK}{i.BOX_V}{s.RESET}")
+    # 50 chars:   --fps <N>       Frame rate (default: 10)        
+    print(f"    {s.BRIGHT_BLACK}{i.BOX_V}{s.RESET}  {s.CYAN}--fps{s.RESET} {s.DIM}<N>{s.RESET}       Frame rate {s.BRIGHT_BLACK}(default: 10){s.RESET}        {s.BRIGHT_BLACK}{i.BOX_V}{s.RESET}")
+    # 50 chars:   --axis <z|y|x>  Slice axis (default: z)         
+    print(f"    {s.BRIGHT_BLACK}{i.BOX_V}{s.RESET}  {s.CYAN}--axis{s.RESET} {s.DIM}<z|y|x>{s.RESET}  Slice axis {s.BRIGHT_BLACK}(default: z){s.RESET}         {s.BRIGHT_BLACK}{i.BOX_V}{s.RESET}")
+    print(f"    {s.BRIGHT_BLACK}{i.BOX_BL}{i.BOX_H * 50}{i.BOX_BR}{s.RESET}")
     print()
-    
+
+    # Keyboard shortcuts in a styled grid
+    print(f"  {s.BRIGHT_WHITE}{s.BOLD}VIEWER SHORTCUTS{s.RESET}")
+    print(_gradient_line(width))
+    print()
+
     _print_shortcut_grid([
         [("↑↓", "Navigate Z"), ("A", "Auto contrast"), ("D", "Distance"), ("S", "Save PNG")],
         [("⎚", "Scroll Z"), ("G", "Global contrast"), ("P", "Polygon"), ("M", "Save MIP")],
@@ -308,18 +599,25 @@ def _print_help() -> None:
     ])
     print()
 
-    # Examples
-    print(f"  {s.BOLD}EXAMPLES{s.RESET}")
-    print(f"  {s.BRIGHT_BLACK}{i.BOX_H * 54}{s.RESET}")
+    # Examples in a nice styled section
+    print(f"  {s.BRIGHT_WHITE}{s.BOLD}EXAMPLES{s.RESET}")
+    print(_gradient_line(width))
     print()
-    print(f"  {s.BRIGHT_BLACK}# View a TCF file{s.RESET}")
-    print(f"  {s.DIM}${s.RESET} python -m tomocube view sample.TCF")
-    print()
-    print(f"  {s.BRIGHT_BLACK}# Export to 32-bit TIFF{s.RESET}")
-    print(f"  {s.DIM}${s.RESET} python -m tomocube tiff sample.TCF --32bit")
-    print()
-    print(f"  {s.BRIGHT_BLACK}# Create HT+FL overlay animation{s.RESET}")
-    print(f"  {s.DIM}${s.RESET} python -m tomocube gif sample.TCF --overlay --fps 15")
+
+    examples = [
+        ("View a TCF file", "python -m tomocube view sample.TCF"),
+        ("Export to 32-bit TIFF", "python -m tomocube tiff sample.TCF --32bit"),
+        ("Create HT+FL overlay animation", "python -m tomocube gif sample.TCF --overlay --fps 15"),
+    ]
+
+    for comment, cmd in examples:
+        print(f"  {s.BRIGHT_BLACK}# {comment}{s.RESET}")
+        print(f"  {s.DIM}${s.RESET} {s.CYAN}{cmd}{s.RESET}")
+        print()
+
+    # Footer
+    print(_gradient_line(width))
+    print(f"  {s.DIM}Documentation: {s.RESET}{s.BRIGHT_BLACK}https://github.com/tomocube/tomocube-tools{s.RESET}")
     print()
 
 
@@ -331,10 +629,10 @@ def _print_shortcut_grid(rows: list[list[tuple[str, str]]]) -> None:
         parts = []
         for key, desc in row:
             if key:
-                parts.append(f"  {s.CYAN}{key:6}{s.RESET} {s.DIM}{desc:12}{s.RESET}")
+                parts.append(f"{s.CYAN}{key:7}{s.RESET} {s.DIM}{desc:15}{s.RESET}")
             else:
-                parts.append(" " * 20)
-        print("".join(parts))
+                parts.append(" " * 23)
+        print("  " + "".join(parts))
 
 
 def _print_shortcut_row(shortcuts: list[tuple[str, str]]) -> None:
@@ -353,27 +651,32 @@ def _print_short_usage() -> None:
     """Print short usage when no command given."""
     s = Style
     i = Icons
-    _print_logo()
+    width = _get_content_width()
 
-    print(f"  {s.BOLD}USAGE{s.RESET}")
-    print(f"  {s.BRIGHT_BLACK}{i.BOX_H * 54}{s.RESET}")
-    print(f"  python -m tomocube {s.CYAN}<command>{s.RESET} {s.DIM}[file] [options]{s.RESET}")
+    _print_logo(compact=True)
+
+    print(f"  {s.BRIGHT_WHITE}{s.BOLD}QUICK START{s.RESET}")
+    print(_gradient_line(width))
     print()
-    
-    print(f"  {s.BOLD}COMMANDS{s.RESET}")
-    print(f"  {s.BRIGHT_BLACK}{i.BOX_H * 54}{s.RESET}")
+    print(f"  {s.DIM}${s.RESET} python -m tomocube {s.CYAN}<command>{s.RESET} {s.BRIGHT_BLACK}[file] [options]{s.RESET}")
     print()
-    print(f"    {s.CYAN}view{s.RESET}   Interactive 3D viewer     {s.CYAN}tiff{s.RESET}   Export TIFF stack")
-    print(f"    {s.CYAN}slice{s.RESET}  HT/FL comparison          {s.CYAN}mat{s.RESET}    Export MATLAB .mat")
-    print(f"    {s.CYAN}info{s.RESET}   File metadata             {s.CYAN}gif{s.RESET}    Create animation")
+
+    # Commands in a nice grid
+    print(f"  {s.BRIGHT_BLACK}{i.BOX_TL}{i.BOX_H * 26}{i.BOX_T}{i.BOX_H * 26}{i.BOX_TR}{s.RESET}")
+    print(f"  {s.BRIGHT_BLACK}{i.BOX_V}{s.RESET} {s.CYAN}view{s.RESET}  {s.DIM}3D slice viewer{s.RESET}    {s.BRIGHT_BLACK}{i.BOX_V}{s.RESET} {s.CYAN}tiff{s.RESET}  {s.DIM}TIFF export{s.RESET}        {s.BRIGHT_BLACK}{i.BOX_V}{s.RESET}")
+    print(f"  {s.BRIGHT_BLACK}{i.BOX_V}{s.RESET} {s.CYAN}slice{s.RESET} {s.DIM}HT/FL comparison{s.RESET}   {s.BRIGHT_BLACK}{i.BOX_V}{s.RESET} {s.CYAN}mat{s.RESET}   {s.DIM}MATLAB export{s.RESET}      {s.BRIGHT_BLACK}{i.BOX_V}{s.RESET}")
+    print(f"  {s.BRIGHT_BLACK}{i.BOX_V}{s.RESET} {s.CYAN}info{s.RESET}  {s.DIM}File metadata{s.RESET}      {s.BRIGHT_BLACK}{i.BOX_V}{s.RESET} {s.CYAN}gif{s.RESET}   {s.DIM}Animation{s.RESET}          {s.BRIGHT_BLACK}{i.BOX_V}{s.RESET}")
+    print(f"  {s.BRIGHT_BLACK}{i.BOX_BL}{i.BOX_H * 26}{i.BOX_B}{i.BOX_H * 26}{i.BOX_BR}{s.RESET}")
     print()
-    print(f"  {s.DIM}Run{s.RESET} python -m tomocube help {s.DIM}for detailed options{s.RESET}")
+
+    print(f"  {s.BRIGHT_BLACK}{i.INFO}{s.RESET} Run {s.CYAN}python -m tomocube help{s.RESET} for detailed options")
     print()
 
 
 def _print_info(file_path: str) -> int:
     """Print formatted file information."""
     from tomocube.core import TCFFile
+    from tomocube.processing import discover_related_metadata
 
     s = Style
     tcf_path = Path(file_path)
@@ -389,6 +692,9 @@ def _print_info(file_path: str) -> int:
         _print_error(f"Could not read file: {e}")
         return 1
 
+    # Discover related metadata files
+    related_meta = discover_related_metadata(tcf_path)
+
     # Calculate physical dimensions
     ht_z, ht_y, ht_x = info.ht_shape
     res_z, res_y, res_x = info.ht_resolution
@@ -397,7 +703,7 @@ def _print_info(file_path: str) -> int:
     fov_z = ht_z * res_z
 
     i = Icons
-    
+
     print()
     print(f"  {s.BRIGHT_CYAN}{s.BOLD}{i.DIAMOND} TCF File Info{s.RESET}")
     print(f"  {s.BRIGHT_BLACK}{i.BOX_H * 54}{s.RESET}")
@@ -450,8 +756,98 @@ def _print_info(file_path: str) -> int:
         print(f"  {s.BRIGHT_BLACK}{i.BOX_BL}{i.BOX_H}{s.RESET} Resolution   {fl_res[2]:.3f} × {fl_res[1]:.3f} × {fl_res[0]:.3f} {s.BRIGHT_BLACK}μm/px{s.RESET}")
     else:
         print(f"  {s.BRIGHT_BLACK}{i.POINTER}{s.RESET} {s.BOLD}Fluorescence{s.RESET}  {s.BRIGHT_BLACK}{i.CROSS} Not available{s.RESET}")
-
     print()
+
+    # Related metadata sections (from external files)
+    if related_meta:
+        # Experiment metadata
+        if "experiment" in related_meta:
+            exp = related_meta["experiment"]
+            print(f"  {s.BRIGHT_BLUE}{i.POINTER}{s.RESET} {s.BOLD}Experiment{s.RESET}  {s.BRIGHT_BLACK}(.experiment){s.RESET}")
+            print(f"  {s.BRIGHT_BLACK}{i.BOX_V}{s.RESET}")
+            if "experimentTitle" in exp:
+                print(f"  {s.BRIGHT_BLACK}{i.BOX_L}{i.BOX_H}{s.RESET} Title        {s.CYAN}{exp['experimentTitle']}{s.RESET}")
+            if "createdDate" in exp:
+                # Format date from YYYYMMDD to YYYY-MM-DD
+                date_str = str(exp["createdDate"])
+                if len(date_str) == 8:
+                    date_str = f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:]}"
+                print(f"  {s.BRIGHT_BLACK}{i.BOX_L}{i.BOX_H}{s.RESET} Date         {date_str}")
+            if "user" in exp and exp["user"]:
+                print(f"  {s.BRIGHT_BLACK}{i.BOX_L}{i.BOX_H}{s.RESET} User         {exp['user']}")
+            if "medium" in exp:
+                medium = exp["medium"]
+                medium_name = medium.get("mediumName", "?")
+                medium_ri = medium.get("mediumRI", "?")
+                print(f"  {s.BRIGHT_BLACK}{i.BOX_L}{i.BOX_H}{s.RESET} Medium       {medium_name} {s.BRIGHT_BLACK}(RI: {medium_ri}){s.RESET}")
+            if "sampleType" in exp:
+                print(f"  {s.BRIGHT_BLACK}{i.BOX_L}{i.BOX_H}{s.RESET} Sample Type  {exp['sampleType']}")
+            if "vesselModel" in exp:
+                print(f"  {s.BRIGHT_BLACK}{i.BOX_L}{i.BOX_H}{s.RESET} Vessel       {exp['vesselModel']}")
+            if "hTLightChannel" in exp:
+                print(f"  {s.BRIGHT_BLACK}{i.BOX_BL}{i.BOX_H}{s.RESET} HT Light Ch  {exp['hTLightChannel']}")
+            print()
+
+        # Vessel metadata
+        if "vessel" in related_meta:
+            vessel = related_meta["vessel"]
+            print(f"  {s.BRIGHT_YELLOW}{i.POINTER}{s.RESET} {s.BOLD}Vessel{s.RESET}  {s.BRIGHT_BLACK}(.vessel){s.RESET}")
+            print(f"  {s.BRIGHT_BLACK}{i.BOX_V}{s.RESET}")
+            if "vessel" in vessel:
+                v = vessel["vessel"]
+                if "name" in v:
+                    print(f"  {s.BRIGHT_BLACK}{i.BOX_L}{i.BOX_H}{s.RESET} Name         {s.CYAN}{v['name']}{s.RESET}")
+                elif "model" in v:
+                    print(f"  {s.BRIGHT_BLACK}{i.BOX_L}{i.BOX_H}{s.RESET} Model        {s.CYAN}{v['model']}{s.RESET}")
+                if "size" in v:
+                    size = v["size"]
+                    # Size can be [width, height] list or dict
+                    if isinstance(size, list) and len(size) >= 2:
+                        print(f"  {s.BRIGHT_BLACK}{i.BOX_L}{i.BOX_H}{s.RESET} Size         {size[0]} × {size[1]} {s.BRIGHT_BLACK}mm{s.RESET}")
+                    elif isinstance(size, dict):
+                        print(f"  {s.BRIGHT_BLACK}{i.BOX_L}{i.BOX_H}{s.RESET} Size         {size.get('width', '?')} × {size.get('height', '?')} {s.BRIGHT_BLACK}mm{s.RESET}")
+                if "NA" in v:
+                    print(f"  {s.BRIGHT_BLACK}{i.BOX_L}{i.BOX_H}{s.RESET} NA           {v['NA']}")
+                if "AFOffset" in v:
+                    print(f"  {s.BRIGHT_BLACK}{i.BOX_L}{i.BOX_H}{s.RESET} AF Offset    {v['AFOffset']} {s.BRIGHT_BLACK}μm{s.RESET}")
+            if "well" in vessel:
+                well = vessel["well"]
+                if "rows" in well and "columns" in well:
+                    print(f"  {s.BRIGHT_BLACK}{i.BOX_L}{i.BOX_H}{s.RESET} Wells        {well['rows']} × {well['columns']} {s.BRIGHT_BLACK}grid{s.RESET}")
+                if "size" in well:
+                    well_size = well["size"]
+                    if isinstance(well_size, list) and len(well_size) >= 2:
+                        print(f"  {s.BRIGHT_BLACK}{i.BOX_L}{i.BOX_H}{s.RESET} Well Size    {well_size[0]} × {well_size[1]} {s.BRIGHT_BLACK}mm{s.RESET}")
+                if "spacing" in well:
+                    spacing = well["spacing"]
+                    if isinstance(spacing, list) and len(spacing) >= 2:
+                        print(f"  {s.BRIGHT_BLACK}{i.BOX_BL}{i.BOX_H}{s.RESET} Well Spacing {spacing[0]} × {spacing[1]} {s.BRIGHT_BLACK}mm{s.RESET}")
+            print()
+
+        # Profile metadata
+        if "profiles" in related_meta:
+            profiles = related_meta["profiles"]
+            profile_names = list(profiles.keys())
+            print(f"  {s.BRIGHT_MAGENTA}{i.POINTER}{s.RESET} {s.BOLD}Profiles{s.RESET}  {s.BRIGHT_BLACK}(profile/*.prf){s.RESET}")
+            print(f"  {s.BRIGHT_BLACK}{i.BOX_V}{s.RESET}")
+            print(f"  {s.BRIGHT_BLACK}{i.BOX_L}{i.BOX_H}{s.RESET} Available    {s.CYAN}{', '.join(profile_names)}{s.RESET}")
+            # Show key settings from img profile if available
+            if "img" in profiles:
+                img = profiles["img"]
+                if "DefaultParameters" in img:
+                    defaults = img["DefaultParameters"]
+                    if "DefaultStep" in defaults:
+                        print(f"  {s.BRIGHT_BLACK}{i.BOX_L}{i.BOX_H}{s.RESET} Z Step       {defaults['DefaultStep']} {s.BRIGHT_BLACK}μm{s.RESET}")
+                    if "DefaultSlices" in defaults:
+                        print(f"  {s.BRIGHT_BLACK}{i.BOX_L}{i.BOX_H}{s.RESET} Z Slices     {defaults['DefaultSlices']}")
+                if "SupportedNA" in img:
+                    na_list = img["SupportedNA"]
+                    if isinstance(na_list, dict):
+                        na_values = [str(v) for v in na_list.values() if v]
+                        if na_values:
+                            print(f"  {s.BRIGHT_BLACK}{i.BOX_BL}{i.BOX_H}{s.RESET} Supported NA {', '.join(na_values)}")
+            print()
+
     return 0
 
 

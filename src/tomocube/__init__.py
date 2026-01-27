@@ -33,6 +33,11 @@ from tomocube.processing import (
     # Metadata
     extract_metadata,
     parse_ini_string,
+    load_profile_file,
+    load_vessel_file,
+    load_project_file,
+    load_experiment_file,
+    discover_related_metadata,
     # Export
     export_to_tiff,
     export_to_mat,
@@ -71,6 +76,11 @@ __all__ = [
     "compute_overlap_score",
     "extract_metadata",
     "parse_ini_string",
+    "load_profile_file",
+    "load_vessel_file",
+    "load_project_file",
+    "load_experiment_file",
+    "discover_related_metadata",
     # Export
     "export_to_tiff",
     "export_to_mat",

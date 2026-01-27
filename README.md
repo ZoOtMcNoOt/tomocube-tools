@@ -305,6 +305,33 @@ metadata = extract_metadata(hdf5_group)
 config = parse_ini_string(ini_text)
 ```
 
+### External Metadata Files
+
+```python
+from tomocube import (
+    load_profile_file,
+    load_vessel_file,
+    load_project_file,
+    load_experiment_file,
+)
+
+# Load .prf profile file (INI format) - processing parameters
+profile = load_profile_file("Cell.img.prf")
+print(profile["DefaultParameters"])  # Default imaging settings
+
+# Load .vessel file (JSON) - well plate geometry
+vessel = load_vessel_file(".vessel")
+print(vessel["vessel"]["model"])  # "Ibidi μ-Slide 8well"
+
+# Load .tcxpro project file (JSON)
+project = load_project_file("2052_lab.tcxpro")
+print(project["projectTitle"])
+
+# Load .tcxexp or .experiment file (JSON)
+experiment = load_experiment_file(".experiment")
+print(experiment["medium"]["mediumRI"])  # 1.337
+```
+
 ### Measurement Tools
 
 ```python
