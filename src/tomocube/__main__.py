@@ -1258,14 +1258,21 @@ def _view_3d(args: list[str]) -> int:
         print(f"  Usage: python -m tomocube view3d <file.TCF> [options]")
         print()
         print(f"  {s.BRIGHT_BLACK}Options:{s.RESET}")
-        print(f"    {s.CYAN}--slices{s.RESET}      Start in 2D slice mode (use slider to navigate Z)")
-        print(f"    {s.CYAN}--render{s.RESET}      Rendering mode: mip, attenuated_mip, minip, average")
-        print(f"    {s.CYAN}--screenshot{s.RESET}  Save screenshot to file")
+        print(f"    {s.CYAN}--slices{s.RESET}          Start in 2D slice mode (use slider to navigate Z)")
+        print(f"    {s.CYAN}--render{s.RESET}          Rendering mode: mip, attenuated_mip, minip, average")
+        print(f"    {s.CYAN}--z-offset-mode{s.RESET}   FL Z alignment: auto, start, center")
+        print(f"    {s.CYAN}--screenshot{s.RESET}      Save screenshot to file")
+        print()
+        print(f"  {s.BRIGHT_BLACK}Z Offset Modes:{s.RESET}")
+        print(f"    {s.CYAN}auto{s.RESET}     Auto-detect best mode based on overlap (default)")
+        print(f"    {s.CYAN}start{s.RESET}    Use file's OffsetZ as FL start position")
+        print(f"    {s.CYAN}center{s.RESET}   Use file's OffsetZ as FL center position")
         print()
         print(f"  {s.BRIGHT_BLACK}Examples:{s.RESET}")
         print(f"    {s.DIM}python -m tomocube view3d sample.TCF{s.RESET}")
         print(f"    {s.DIM}python -m tomocube view3d sample.TCF --slices{s.RESET}")
         print(f"    {s.DIM}python -m tomocube view3d sample.TCF --render attenuated_mip{s.RESET}")
+        print(f"    {s.DIM}python -m tomocube view3d sample.TCF --z-offset-mode center{s.RESET}")
         print(f"    {s.DIM}python -m tomocube view3d sample.TCF --screenshot output.png{s.RESET}")
         print()
         print(f"  {s.BRIGHT_BLACK}Install dependencies:{s.RESET}")
@@ -1278,6 +1285,7 @@ def _view_3d(args: list[str]) -> int:
     show_slices = False
     rendering = "mip"
     screenshot = None
+    z_offset_mode = "auto"
 
     idx = 1
     while idx < len(parts):
@@ -1292,6 +1300,13 @@ def _view_3d(args: list[str]) -> int:
                 print(f"  Valid modes: mip, attenuated_mip, minip, average")
                 return 1
             idx += 2
+        elif arg == "--z-offset-mode" and idx + 1 < len(parts):
+            z_offset_mode = parts[idx + 1].lower()
+            if z_offset_mode not in ("auto", "start", "center"):
+                _print_error(f"Invalid z-offset-mode: {z_offset_mode}")
+                print(f"  Valid modes: auto, start, center")
+                return 1
+            idx += 2
         elif arg == "--screenshot" and idx + 1 < len(parts):
             screenshot = parts[idx + 1]
             idx += 2
@@ -1303,25 +1318,27 @@ def _view_3d(args: list[str]) -> int:
         return 1
 
     mode = "2D slices" if show_slices else "3D volume"
-    
+
     print()
     print(f"  {s.BRIGHT_CYAN}{Icons.CUBE}{s.RESET} {s.BOLD}3D Volume Viewer{s.RESET}")
     print(f"  {s.BRIGHT_BLACK}{'─' * 50}{s.RESET}")
-    print(f"  {s.DIM}File:{s.RESET}      {Path(tcf_path).name}")
-    print(f"  {s.DIM}Mode:{s.RESET}      {mode}")
-    print(f"  {s.DIM}Rendering:{s.RESET} {rendering}")
+    print(f"  {s.DIM}File:{s.RESET}         {Path(tcf_path).name}")
+    print(f"  {s.DIM}Mode:{s.RESET}         {mode}")
+    print(f"  {s.DIM}Rendering:{s.RESET}    {rendering}")
+    print(f"  {s.DIM}Z Offset:{s.RESET}     {z_offset_mode}")
     if screenshot:
-        print(f"  {s.DIM}Screenshot:{s.RESET} {screenshot}")
+        print(f"  {s.DIM}Screenshot:{s.RESET}   {screenshot}")
     print()
 
     try:
         from tomocube.viewer.viewer_3d import view_3d
-        
+
         view_3d(
             tcf_path,
             show_slices=show_slices,
             rendering=rendering,
             screenshot=screenshot,
+            z_offset_mode=z_offset_mode,
         )
         return 0
     except ImportError as e:

@@ -47,7 +47,10 @@ from __future__ import annotations
 import logging
 import os
 import sys
+import threading
+import time
 from datetime import datetime
+from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -67,6 +70,33 @@ if TYPE_CHECKING:
     from matplotlib.backend_bases import Event
 
 logger = logging.getLogger(__name__)
+
+
+class Debouncer:
+    """Debounce rapid function calls - only execute after delay with no new calls."""
+
+    def __init__(self, delay_ms: int = 100):
+        self.delay_ms = delay_ms
+        self._timer: threading.Timer | None = None
+        self._lock = threading.Lock()
+
+    def call(self, func, *args, **kwargs):
+        """Schedule function call, cancelling any pending call."""
+        with self._lock:
+            if self._timer is not None:
+                self._timer.cancel()
+            self._timer = threading.Timer(
+                self.delay_ms / 1000.0,
+                lambda: func(*args, **kwargs)
+            )
+            self._timer.start()
+
+    def cancel(self):
+        """Cancel any pending call."""
+        with self._lock:
+            if self._timer is not None:
+                self._timer.cancel()
+                self._timer = None
 
 
 class TCFViewer:
@@ -113,6 +143,14 @@ class TCFViewer:
 
         # Measurement tool
         self._measurement_tool: MeasurementTool | None = None
+
+        # Performance: histogram debouncing
+        self._histogram_debouncer = Debouncer(delay_ms=150)
+        self._histogram_pending = False
+
+        # Performance: FL overlay cache
+        self._fl_rgba_cache: dict[str, np.ndarray] = {}
+        self._fl_cache_params: tuple | None = None  # (z, y, x, alpha, vmin, vmax)
 
         try:
             self._load_file()
@@ -485,27 +523,50 @@ class TCFViewer:
             # Always create overlay - use zeros if no data for this slice
             if fl_slice is None:
                 fl_slice = np.zeros((ht_shape[1], ht_shape[2]), dtype=np.float32)
-            fl_rgba = self._create_fl_rgba(fl_slice)
+            fl_rgba = self._create_fl_rgba(fl_slice, cache_key="xy")
             self._im_fl_xy = ax.imshow(fl_rgba, extent=extent, aspect="equal")
             self._im_fl_xy.set_visible(self.s.show_fluorescence)
         elif plane == "xz":
             fl_slice = self._get_fl_xz_slice(fl_3d)
-            fl_rgba = self._create_fl_rgba(fl_slice)
+            fl_rgba = self._create_fl_rgba(fl_slice, cache_key="xz")
             self._im_fl_xz = ax.imshow(fl_rgba, extent=extent, aspect="auto")
             self._im_fl_xz.set_visible(self.s.show_fluorescence)
         else:  # yz
             fl_slice = self._get_fl_yz_slice(fl_3d)
-            fl_rgba = self._create_fl_rgba(fl_slice)
+            fl_rgba = self._create_fl_rgba(fl_slice, cache_key="yz")
             self._im_fl_yz = ax.imshow(fl_rgba, extent=extent, aspect="auto")
             self._im_fl_yz.set_visible(self.s.show_fluorescence)
 
-    def _create_fl_rgba(self, fl_slice: np.ndarray) -> np.ndarray:
-        """Create RGBA array for FL overlay."""
+    def _create_fl_rgba(self, fl_slice: np.ndarray, cache_key: str | None = None) -> np.ndarray:
+        """Create RGBA array for FL overlay with optional caching."""
+        # Check cache
+        cache_params = (
+            self.s.current_z, self.s.current_y, self.s.current_x,
+            self.s.fl_overlay_alpha, self.s.fl_vmin, self.s.fl_vmax
+        )
+
+        if cache_key and self._fl_cache_params == cache_params:
+            cached = self._fl_rgba_cache.get(cache_key)
+            if cached is not None:
+                return cached
+
+        # Compute RGBA
         fl_norm = normalize_with_bounds(fl_slice, self.s.fl_vmin, self.s.fl_vmax)
         fl_rgba = np.zeros((*fl_norm.shape, 4), dtype=np.float32)
         fl_rgba[:, :, 1] = fl_norm  # Green channel
         fl_rgba[:, :, 3] = fl_norm * self.s.fl_overlay_alpha
+
+        # Store in cache
+        if cache_key:
+            self._fl_rgba_cache[cache_key] = fl_rgba
+            self._fl_cache_params = cache_params
+
         return fl_rgba
+
+    def _invalidate_fl_cache(self) -> None:
+        """Clear FL overlay cache when parameters change."""
+        self._fl_rgba_cache.clear()
+        self._fl_cache_params = None
 
     def _add_scale_bar(self, ax, fov_um: float) -> None:
         """Add a scale bar to the axis."""
@@ -566,7 +627,7 @@ class TCFViewer:
         self._update_info_text()
 
     def _update_fl_overlays(self) -> None:
-        """Update FL overlay data."""
+        """Update FL overlay data with caching."""
         ch = self.s.current_fl_channel
         if ch is None or ch not in self.loader.fl_data:
             return
@@ -574,20 +635,23 @@ class TCFViewer:
         fl_3d = self.loader.fl_data[ch]
         ht_shape = self.loader.data_3d.shape
 
+        # Invalidate cache when position changes
+        self._invalidate_fl_cache()
+
         if self._im_fl_xy is not None:
             fl_slice = self._get_fl_xy_slice(fl_3d)
             # Use zeros if no FL data for this slice
             if fl_slice is None:
                 fl_slice = np.zeros((ht_shape[1], ht_shape[2]), dtype=np.float32)
-            self._im_fl_xy.set_data(self._create_fl_rgba(fl_slice))
+            self._im_fl_xy.set_data(self._create_fl_rgba(fl_slice, cache_key="xy"))
 
         if self._im_fl_xz is not None:
             fl_slice = self._get_fl_xz_slice(fl_3d)
-            self._im_fl_xz.set_data(self._create_fl_rgba(fl_slice))
+            self._im_fl_xz.set_data(self._create_fl_rgba(fl_slice, cache_key="xz"))
 
         if self._im_fl_yz is not None:
             fl_slice = self._get_fl_yz_slice(fl_3d)
-            self._im_fl_yz.set_data(self._create_fl_rgba(fl_slice))
+            self._im_fl_yz.set_data(self._create_fl_rgba(fl_slice, cache_key="yz"))
 
     def _update_contrast(self) -> None:
         """Update contrast/colormap without redrawing everything."""
@@ -606,14 +670,33 @@ class TCFViewer:
         self._cbar_ht.mappable.set_clim(s.vmin, s.vmax)
         self._cbar_ht.mappable.set_cmap(cmap)
 
-        # Update histogram
+        # Update histogram (debounced for performance during rapid navigation)
         xy_slice = self.loader.data_3d[s.current_z]
-        self._update_histogram(xy_slice)
+        self._update_histogram_debounced(xy_slice)
 
         self._update_info_text()
 
+    def _update_histogram_debounced(self, xy_slice: np.ndarray) -> None:
+        """Schedule debounced histogram update."""
+        self._histogram_debouncer.call(self._update_histogram_now, xy_slice.copy())
+
+    def _update_histogram_now(self, xy_slice: np.ndarray) -> None:
+        """Actually update histogram (called after debounce delay)."""
+        try:
+            self.ax_hist.clear()
+            self.ax_hist.hist(xy_slice.ravel(), bins=100, color="#4a9eff", alpha=0.7)
+            self.ax_hist.axvline(self.s.vmin, color="#ff6b6b", ls="--", lw=1.5)
+            self.ax_hist.axvline(self.s.vmax, color="#ff6b6b", ls="--", lw=1.5)
+            self.ax_hist.set_xlabel("Refractive Index", color="white", fontsize=9)
+            self.ax_hist.set_ylabel("Count", color="white", fontsize=9)
+            self.ax_hist.set_title("RI Distribution", color="white", fontsize=10)
+            self.ax_hist.tick_params(colors="white", labelsize=8)
+            self.fig.canvas.draw_idle()
+        except Exception:
+            pass  # Ignore if figure was closed
+
     def _update_histogram(self, xy_slice: np.ndarray) -> None:
-        """Update histogram display."""
+        """Update histogram display immediately (for initial display)."""
         self.ax_hist.clear()
         self.ax_hist.hist(xy_slice.ravel(), bins=100, color="#4a9eff", alpha=0.7)
         self.ax_hist.axvline(self.s.vmin, color="#ff6b6b", ls="--", lw=1.5)

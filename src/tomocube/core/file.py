@@ -221,11 +221,23 @@ def load_registration_params(f: h5py.File) -> RegistrationParams:
     else:
         logger.debug("FL data path not found, using default resolution")
 
-    # FL Z offset
-    if f"{PATH_DATA_3D_FL}/CH0" in f:
-        ch = _as_group(f[f"{PATH_DATA_3D_FL}/CH0"])
-        if ATTR_OFFSET_Z in ch.attrs:
-            params.fl_offset_z = float(np.asarray(ch.attrs[ATTR_OFFSET_Z])[0])
+    # FL Z offsets - read per-channel offsets
+    channel_offsets: dict[str, float] = {}
+    if PATH_DATA_3D_FL in f:
+        fl_group = _as_group(f[PATH_DATA_3D_FL])
+        for ch_name in fl_group.keys():
+            ch_path = f"{PATH_DATA_3D_FL}/{ch_name}"
+            if ch_path in f:
+                ch = _as_group(f[ch_path])
+                if ATTR_OFFSET_Z in ch.attrs:
+                    offset = float(np.asarray(ch.attrs[ATTR_OFFSET_Z])[0])
+                    channel_offsets[ch_name] = offset
+                    # Use first channel offset as default
+                    if params.fl_offset_z == 0.0:
+                        params.fl_offset_z = offset
+
+    if channel_offsets:
+        params.channel_offsets_z = channel_offsets
 
     # Validate resolution values are positive
     if params.ht_res_x <= 0 or params.ht_res_y <= 0 or params.ht_res_z <= 0:

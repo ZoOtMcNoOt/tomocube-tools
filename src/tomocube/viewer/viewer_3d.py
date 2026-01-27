@@ -8,20 +8,33 @@ Provides interactive 3D visualization using napari with:
 - Layer controls with background removal
 - Camera presets for different viewing angles
 - Scale bar with physical units
-- Screenshot export
+- Screenshot and animation export (GIF/MP4)
+- Performance optimization for large volumes (512^3+)
 
 Usage:
     python -m tomocube view3d sample.TCF
     python -m tomocube view3d sample.TCF --slices
+
+Keyboard shortcuts:
+    1-6     Camera presets (Top, Bottom, Front, Back, Left, Right)
+    0       Isometric view
+    R       Reset camera
+    F       Fit view to data
+    +/-     Zoom in/out
+    T       Start turntable animation export
+    2/3     Toggle 2D/3D view
 """
 
 from __future__ import annotations
 
 import logging
+import threading
+import time
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
 
 import numpy as np
+from scipy.ndimage import zoom as scipy_zoom
 
 if TYPE_CHECKING:
     from tomocube.core.file import TCFFileLoader
@@ -29,17 +42,402 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+# =============================================================================
+# Performance: Volume Downsampling for Interactive Mode
+# =============================================================================
+
+class InteractiveDownsampler:
+    """
+    Manages automatic downsampling during camera interaction for large volumes.
+
+    When the user rotates/zooms, we temporarily show a lower-resolution version
+    for smooth interaction, then restore full resolution when interaction stops.
+    """
+
+    def __init__(self, viewer, layers_data: dict, scale: tuple,
+                 downsample_factor: int = 2, debounce_ms: int = 300):
+        """
+        Args:
+            viewer: napari Viewer instance
+            layers_data: Dict mapping layer names to their full-resolution data
+            scale: Original voxel scale (z, y, x)
+            downsample_factor: Factor to reduce resolution by during interaction
+            debounce_ms: Milliseconds to wait after interaction stops before restoring
+        """
+        self.viewer = viewer
+        self.full_data = layers_data
+        self.scale = scale
+        self.factor = downsample_factor
+        self.debounce_ms = debounce_ms
+
+        self._is_downsampled = False
+        self._restore_timer = None
+        self._interaction_count = 0
+
+        # Pre-compute downsampled versions for speed
+        self._downsampled_data = {}
+        self._downsampled_scale = None
+        self._precompute_downsampled()
+
+        # Connect to camera events
+        self.viewer.camera.events.angles.connect(self._on_camera_change)
+        self.viewer.camera.events.zoom.connect(self._on_camera_change)
+        self.viewer.camera.events.center.connect(self._on_camera_change)
+
+    def _precompute_downsampled(self):
+        """Pre-compute downsampled volumes for all layers."""
+        factor = self.factor
+        inv_factor = 1.0 / factor
+
+        for name, data in self.full_data.items():
+            if data.ndim == 3 and data.size > 128**3:  # Only downsample large volumes
+                # Use order=1 (linear) for speed, order=0 (nearest) even faster
+                downsampled = scipy_zoom(data, inv_factor, order=1)
+                self._downsampled_data[name] = downsampled
+
+        # Adjust scale for downsampled data
+        self._downsampled_scale = tuple(s * factor for s in self.scale)
+
+    def _on_camera_change(self, event=None):
+        """Called when camera angles, zoom, or center changes."""
+        if not self._downsampled_data:
+            return  # No large volumes to downsample
+
+        self._interaction_count += 1
+        current_count = self._interaction_count
+
+        # Switch to downsampled immediately if not already
+        if not self._is_downsampled:
+            self._apply_downsampled()
+
+        # Cancel any pending restore
+        if self._restore_timer is not None:
+            self._restore_timer = None
+
+        # Schedule restore after debounce period
+        def schedule_restore():
+            time.sleep(self.debounce_ms / 1000.0)
+            # Only restore if no new interactions occurred
+            if current_count == self._interaction_count and self._is_downsampled:
+                self._restore_full()
+
+        self._restore_timer = threading.Thread(target=schedule_restore, daemon=True)
+        self._restore_timer.start()
+
+    def _apply_downsampled(self):
+        """Switch all layers to downsampled versions."""
+        for layer in self.viewer.layers:
+            if layer.name in self._downsampled_data:
+                layer.data = self._downsampled_data[layer.name]
+                layer.scale = self._downsampled_scale
+        self._is_downsampled = True
+
+    def _restore_full(self):
+        """Restore all layers to full resolution."""
+        for layer in self.viewer.layers:
+            if layer.name in self.full_data:
+                layer.data = self.full_data[layer.name]
+                layer.scale = self.scale
+        self._is_downsampled = False
+
+    def disconnect(self):
+        """Clean up event connections."""
+        try:
+            self.viewer.camera.events.angles.disconnect(self._on_camera_change)
+            self.viewer.camera.events.zoom.disconnect(self._on_camera_change)
+            self.viewer.camera.events.center.disconnect(self._on_camera_change)
+        except Exception:
+            pass
+
+
+# =============================================================================
+# Animation Export
+# =============================================================================
+
+class AnimationExporter:
+    """
+    Export turntable and slice sweep animations as GIF or MP4.
+
+    IMPORTANT: All methods must be called from the main Qt thread since
+    napari's screenshot() requires OpenGL context on the main thread.
+    Use capture_frame() with QTimer for animation loops.
+    """
+
+    def __init__(self, viewer, output_dir: Path):
+        self.viewer = viewer
+        self.output_dir = output_dir
+        self._is_exporting = False
+        self._frames: list = []
+        self._export_config: dict = {}
+        self._original_state: dict = {}
+
+    def start_turntable_export(
+        self,
+        filename: str,
+        n_frames: int,
+        duration_ms: int,
+    ) -> None:
+        """
+        Initialize turntable export state. Call capture_turntable_frame() repeatedly.
+        Must be called from main thread.
+        """
+        self._is_exporting = True
+        self._frames = []
+        self._export_config = {
+            "mode": "turntable",
+            "filename": filename,
+            "n_frames": n_frames,
+            "duration_ms": duration_ms,
+            "current_frame": 0,
+        }
+        self._original_state = {
+            "angles": self.viewer.camera.angles,
+        }
+        # Ensure 3D mode
+        self.viewer.dims.ndisplay = 3
+
+    def capture_turntable_frame(self) -> tuple[int, int, bool]:
+        """
+        Capture one frame of turntable animation. Returns (current, total, done).
+        Must be called from main thread.
+        """
+        from qtpy.QtWidgets import QApplication
+
+        cfg = self._export_config
+        current = cfg["current_frame"]
+        n_frames = cfg["n_frames"]
+
+        if current >= n_frames:
+            return (current, n_frames, True)
+
+        # Calculate rotation angle
+        roll, pitch, yaw = self._original_state["angles"]
+        angle = yaw + (360 * current / n_frames)
+        self.viewer.camera.angles = (roll, pitch, angle)
+
+        # Process events to ensure render completes
+        QApplication.processEvents()
+
+        # Capture frame
+        frame = self.viewer.screenshot(canvas_only=True)
+        self._frames.append(frame)
+
+        cfg["current_frame"] = current + 1
+        done = cfg["current_frame"] >= n_frames
+
+        return (current + 1, n_frames, done)
+
+    def start_slice_sweep_export(
+        self,
+        filename: str,
+        axis: int,
+        duration_ms: int,
+    ) -> int:
+        """
+        Initialize slice sweep export. Returns total number of slices.
+        Must be called from main thread.
+        
+        Args:
+            axis: 0=Z, 1=Y, 2=X (napari dim order for 3D volume)
+        """
+        self._is_exporting = True
+        self._frames = []
+
+        n_slices = int(self.viewer.dims.range[axis][1])
+
+        self._export_config = {
+            "mode": "sweep",
+            "filename": filename,
+            "axis": axis,
+            "n_slices": n_slices,
+            "duration_ms": duration_ms,
+            "current_frame": 0,
+        }
+        self._original_state = {
+            "ndisplay": self.viewer.dims.ndisplay,
+            "point": list(self.viewer.dims.point),
+            "order": list(self.viewer.dims.order),
+        }
+        
+        # Switch to 2D mode and set the correct axis to be the sliced dimension
+        # In napari 2D mode, the first axis in `order` is the one being sliced
+        # Default order is (0, 1, 2) meaning Z is sliced. 
+        # For Y sweep, order should be (1, 0, 2) - Y is sliced, display ZX
+        # For X sweep, order should be (2, 0, 1) - X is sliced, display ZY
+        if axis == 0:  # Z sweep
+            new_order = (0, 1, 2)
+        elif axis == 1:  # Y sweep
+            new_order = (1, 0, 2)
+        else:  # X sweep (axis == 2)
+            new_order = (2, 0, 1)
+        
+        self.viewer.dims.order = new_order
+        self.viewer.dims.ndisplay = 2
+
+        return n_slices
+
+    def capture_sweep_frame(self) -> tuple[int, int, bool]:
+        """
+        Capture one frame of slice sweep animation. Returns (current, total, done).
+        Must be called from main thread.
+        """
+        from qtpy.QtWidgets import QApplication
+
+        cfg = self._export_config
+        current = cfg["current_frame"]
+        n_slices = cfg["n_slices"]
+        axis = cfg["axis"]
+
+        if current >= n_slices:
+            return (current, n_slices, True)
+
+        # Set slice position
+        self.viewer.dims.set_point(axis, current)
+
+        # Process events to ensure render completes
+        QApplication.processEvents()
+
+        # Capture frame
+        frame = self.viewer.screenshot(canvas_only=True)
+        self._frames.append(frame)
+
+        cfg["current_frame"] = current + 1
+        done = cfg["current_frame"] >= n_slices
+
+        return (current + 1, n_slices, done)
+
+    def finish_export(self) -> Path:
+        """
+        Save captured frames to file and restore viewer state.
+        Must be called from main thread.
+        """
+        import imageio.v3 as iio
+
+        cfg = self._export_config
+        filename = cfg["filename"]
+        duration_ms = cfg["duration_ms"]
+
+        # Save animation
+        output_path = self.output_dir / filename
+
+        # Ensure all frames have the same shape (window might resize during capture)
+        if self._frames:
+            # First, normalize all frames to RGB (3 channels)
+            normalized_frames = []
+            for frame in self._frames:
+                if frame.ndim == 3 and frame.shape[2] == 4:
+                    # Convert RGBA to RGB
+                    frame = frame[:, :, :3].copy()
+                elif frame.ndim == 2:
+                    # Grayscale to RGB
+                    frame = np.stack([frame, frame, frame], axis=2)
+                else:
+                    frame = frame.copy()
+                normalized_frames.append(frame)
+            
+            # Find minimum dimensions across all frames
+            min_h = min(f.shape[0] for f in normalized_frames)
+            min_w = min(f.shape[1] for f in normalized_frames)
+            
+            # Ensure dimensions are divisible by 16 (required by h264 macro blocks)
+            min_h = (min_h // 16) * 16
+            min_w = (min_w // 16) * 16
+            
+            # Crop all frames to minimum dimensions
+            final_frames = []
+            for frame in normalized_frames:
+                cropped = frame[:min_h, :min_w, :3]
+                final_frames.append(cropped)
+            
+            # Stack into single array for imageio
+            self._frames = np.stack(final_frames, axis=0)
+
+        if filename.endswith('.mp4'):
+            # Use imageio-ffmpeg for MP4 export
+            fps = max(1, 1000 // duration_ms)
+            try:
+                iio.imwrite(
+                    str(output_path),
+                    self._frames,
+                    fps=fps,
+                    plugin="FFMPEG",
+                )
+            except Exception as e:
+                # Fallback to GIF if ffmpeg fails
+                print(f"Warning: MP4 encoding failed ({e})")
+                print("Saving as GIF instead...")
+                output_path = output_path.with_suffix('.gif')
+                cfg["filename"] = output_path.name
+                duration_sec = duration_ms / 1000.0
+                iio.imwrite(
+                    str(output_path),
+                    self._frames,
+                    duration=duration_sec,
+                    loop=0,
+                    plugin="pillow",
+                )
+        else:
+            # GIF export
+            duration_sec = duration_ms / 1000.0
+            iio.imwrite(
+                str(output_path),
+                self._frames,
+                duration=duration_sec,
+                loop=0,
+                plugin="pillow",
+            )
+
+        # Restore state
+        if cfg["mode"] == "turntable":
+            self.viewer.camera.angles = self._original_state["angles"]
+        else:
+            # Restore dims order first, then ndisplay and points
+            if "order" in self._original_state:
+                self.viewer.dims.order = tuple(self._original_state["order"])
+            self.viewer.dims.ndisplay = self._original_state["ndisplay"]
+            for ax, pt in enumerate(self._original_state["point"]):
+                self.viewer.dims.set_point(ax, pt)
+
+        self._is_exporting = False
+        self._frames = []
+
+        return output_path
+
+    def cancel_export(self) -> None:
+        """Cancel export and restore viewer state."""
+        if not self._is_exporting:
+            return
+
+        cfg = self._export_config
+        if cfg.get("mode") == "turntable":
+            self.viewer.camera.angles = self._original_state.get("angles", (0, -30, 45))
+        elif cfg.get("mode") == "sweep":
+            if "order" in self._original_state:
+                self.viewer.dims.order = tuple(self._original_state["order"])
+            self.viewer.dims.ndisplay = self._original_state.get("ndisplay", 3)
+            for ax, pt in enumerate(self._original_state.get("point", [])):
+                self.viewer.dims.set_point(ax, pt)
+
+        self._is_exporting = False
+        self._frames = []
+
+
 def _get_voxel_scale(loader: TCFFileLoader) -> tuple[float, float, float]:
     """Extract voxel scale from TCF metadata. Returns (z, y, x) in µm."""
     try:
-        if hasattr(loader, 'metadata') and loader.metadata:
-            meta = loader.metadata
-            z_um = meta.get('z_step_um', meta.get('zStep', 0.5))
-            xy_um = meta.get('xy_pixel_um', meta.get('pixelSize', 0.1))
-            return (float(z_um), float(xy_um), float(xy_um))
+        # Use registration params which contain the actual HT resolution
+        if hasattr(loader, 'reg_params') and loader.reg_params is not None:
+            params = loader.reg_params
+            return (
+                float(params.ht_res_z),
+                float(params.ht_res_y),
+                float(params.ht_res_x)
+            )
     except Exception:
         pass
-    return (0.5, 0.1, 0.1)  # Default for Tomocube HT-2H
+    # Fallback to Tomocube HT-2H defaults (from constants.py)
+    from tomocube.core.constants import DEFAULT_HT_RES_X, DEFAULT_HT_RES_Y, DEFAULT_HT_RES_Z
+    return (DEFAULT_HT_RES_Z, DEFAULT_HT_RES_Y, DEFAULT_HT_RES_X)
 
 
 def _create_layer_controls(viewer):
@@ -270,107 +668,167 @@ def _create_layer_controls(viewer):
 
 
 def _create_camera_controls(viewer):
-    """Create camera preset controls."""
+    """Create camera preset controls with keyboard shortcuts."""
     from qtpy.QtWidgets import (
         QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QGridLayout, QSizePolicy
     )
-    
+    from qtpy.QtCore import Qt
+    from qtpy.QtGui import QKeySequence
+    from qtpy.QtWidgets import QShortcut
+
+    # Camera presets: (name, angles, key)
+    CAMERA_PRESETS = [
+        ("Top", (0, 0, 90), "1"),
+        ("Bottom", (0, 180, 90), "2"),
+        ("Front", (0, -90, 0), "3"),
+        ("Back", (0, 90, 0), "4"),
+        ("Left", (90, -90, 0), "5"),
+        ("Right", (-90, -90, 0), "6"),
+    ]
+
     class CameraWidget(QWidget):
         def __init__(self):
             super().__init__()
             self.default_zoom = 0.8
             self.default_angles = (0, -30, 45)
-            
+
             layout = QVBoxLayout(self)
             layout.setSpacing(8)
             layout.setContentsMargins(8, 8, 8, 8)
-            
+
             title = QLabel("<b>Camera</b>")
             title.setStyleSheet("font-size: 13px;")
             layout.addWidget(title)
-            
-            desc = QLabel("View angle presets and zoom controls.")
+
+            desc = QLabel("Keys 1-6 for presets, 0 for isometric, R to reset.")
             desc.setStyleSheet("color: #888; font-size: 10px;")
+            desc.setWordWrap(True)
             layout.addWidget(desc)
-            
+
             # View presets in grid
             grid = QGridLayout()
             grid.setSpacing(4)
-            
-            presets = [
-                ("Top", (0, 0, 90)),
-                ("Bottom", (0, 180, 90)),
-                ("Front", (0, -90, 0)),
-                ("Back", (0, 90, 0)),
-                ("Left", (90, -90, 0)),
-                ("Right", (-90, -90, 0)),
-            ]
-            
-            for i, (name, angles) in enumerate(presets):
-                btn = QPushButton(name)
+
+            for i, (name, angles, key) in enumerate(CAMERA_PRESETS):
+                btn = QPushButton(f"{name} [{key}]")
                 btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-                btn.setToolTip(f"View from {name.lower()}")
-                btn.clicked.connect(lambda checked, a=angles: self._set_view(a))
+                btn.setToolTip(f"View from {name.lower()} (press {key})")
+                btn.clicked.connect(lambda checked, a=angles: self._set_view_animated(a))
                 grid.addWidget(btn, i // 3, i % 3)
-            
+
             layout.addLayout(grid)
-            
+
             # Isometric and reset
             iso_row = QHBoxLayout()
-            
-            iso_btn = QPushButton("Isometric")
+
+            iso_btn = QPushButton("Isometric [0]")
             iso_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-            iso_btn.setToolTip("45-degree isometric view")
-            iso_btn.clicked.connect(lambda: self._set_view((0, -30, 45)))
+            iso_btn.setToolTip("45-degree isometric view (press 0)")
+            iso_btn.clicked.connect(lambda: self._set_view_animated((0, -30, 45)))
             iso_row.addWidget(iso_btn)
-            
-            reset_btn = QPushButton("Reset")
+
+            reset_btn = QPushButton("Reset [R]")
             reset_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-            reset_btn.setToolTip("Reset camera to default")
+            reset_btn.setToolTip("Reset camera to default (press R)")
             reset_btn.clicked.connect(self._reset_camera)
             iso_row.addWidget(reset_btn)
-            
+
             layout.addLayout(iso_row)
-            
+
             # Zoom controls
             zoom_row = QHBoxLayout()
             zoom_lbl = QLabel("Zoom")
             zoom_lbl.setFixedWidth(40)
             zoom_row.addWidget(zoom_lbl)
-            
-            zoom_out = QPushButton("-")
+
+            zoom_out = QPushButton("- [-]")
             zoom_out.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
             zoom_out.clicked.connect(lambda: self._zoom(0.8))
             zoom_row.addWidget(zoom_out)
-            
-            zoom_in = QPushButton("+")
+
+            zoom_in = QPushButton("+ [=]")
             zoom_in.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
             zoom_in.clicked.connect(lambda: self._zoom(1.25))
             zoom_row.addWidget(zoom_in)
-            
-            zoom_fit = QPushButton("Fit")
+
+            zoom_fit = QPushButton("Fit [F]")
             zoom_fit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
             zoom_fit.clicked.connect(lambda: viewer.reset_view())
             zoom_row.addWidget(zoom_fit)
-            
+
             layout.addLayout(zoom_row)
+
             layout.addStretch()
-        
+
+            # Register keyboard shortcuts
+            self._setup_shortcuts()
+
+        def _setup_shortcuts(self):
+            """Register keyboard shortcuts for camera control."""
+            window = viewer.window._qt_window
+
+            # Camera presets 1-6
+            for name, angles, key in CAMERA_PRESETS:
+                shortcut = QShortcut(QKeySequence(key), window)
+                shortcut.activated.connect(lambda a=angles: self._set_view_animated(a))
+
+            # Isometric (0)
+            iso_shortcut = QShortcut(QKeySequence("0"), window)
+            iso_shortcut.activated.connect(lambda: self._set_view_animated((0, -30, 45)))
+
+            # Reset (R)
+            reset_shortcut = QShortcut(QKeySequence("R"), window)
+            reset_shortcut.activated.connect(self._reset_camera)
+
+            # Fit (F)
+            fit_shortcut = QShortcut(QKeySequence("F"), window)
+            fit_shortcut.activated.connect(lambda: viewer.reset_view())
+
+            # Zoom in/out
+            zoom_in = QShortcut(QKeySequence("="), window)
+            zoom_in.activated.connect(lambda: self._zoom(1.25))
+            zoom_in2 = QShortcut(QKeySequence("+"), window)
+            zoom_in2.activated.connect(lambda: self._zoom(1.25))
+
+            zoom_out = QShortcut(QKeySequence("-"), window)
+            zoom_out.activated.connect(lambda: self._zoom(0.8))
+
+        def _set_view_animated(self, target_angles, steps: int = 10):
+            """Animate camera transition to target angles."""
+            from qtpy.QtWidgets import QApplication
+
+            viewer.dims.ndisplay = 3
+
+            # Get current angles
+            current = viewer.camera.angles
+            target = target_angles
+
+            # Simple linear interpolation over steps
+            def lerp(a, b, t):
+                return a + (b - a) * t
+
+            for i in range(1, steps + 1):
+                t = i / steps
+                new_angles = tuple(lerp(current[j], target[j], t) for j in range(3))
+                viewer.camera.angles = new_angles
+                QApplication.processEvents()  # Process Qt events to update display
+                time.sleep(0.02)  # ~50fps animation
+
         def _set_view(self, angles):
             viewer.dims.ndisplay = 3
             viewer.camera.angles = angles
-        
+
         def _zoom(self, factor):
             viewer.camera.zoom *= factor
-        
+
         def _reset_camera(self):
             viewer.dims.ndisplay = 3
-            viewer.camera.angles = self.default_angles
+            self._set_view_animated(self.default_angles)
             viewer.camera.zoom = self.default_zoom
             viewer.camera.center = (0, 0, 0)
-    
+
     widget = CameraWidget()
-    viewer.window.add_dock_widget(widget, name="Camera", area="right")
+    viewer.window.add_dock_widget(widget, name="Camera", area="left")
     return widget
 
 
@@ -510,8 +968,523 @@ def _create_crop_widget(viewer, ht_data: np.ndarray, scale: tuple):
                     layer.translate = (0, 0, 0)
     
     crop_widget = CropWidget()
-    viewer.window.add_dock_widget(crop_widget, name="Volume Crop", area="right")
+    viewer.window.add_dock_widget(crop_widget, name="Volume Crop", area="left")
     return crop_widget
+
+
+def _create_clipping_widget(viewer, ht_data: np.ndarray, scale: tuple):
+    """Create clipping planes widget for volume sectioning with range sliders."""
+    from superqt import QRangeSlider
+    from qtpy.QtWidgets import (
+        QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
+        QCheckBox, QSizePolicy, QGroupBox
+    )
+    from qtpy.QtCore import Qt
+
+    class ClippingWidget(QWidget):
+        def __init__(self):
+            super().__init__()
+            self.full_data = {}
+            self.clip_enabled = {"x": False, "y": False, "z": False}
+            # Store ranges as (min, max) tuples
+            self.clip_ranges = {"x": (0, 0), "y": (0, 0), "z": (0, 0)}
+
+            # Store original data
+            for layer in viewer.layers:
+                if hasattr(layer, 'data') and isinstance(layer.data, np.ndarray):
+                    if layer.data.ndim == 3:
+                        self.full_data[layer.name] = layer.data.copy()
+
+            z, y, x = ht_data.shape
+            # Store max values for initialization
+            self.max_vals = {"x": x - 1, "y": y - 1, "z": z - 1}
+            # Initialize ranges to full extent
+            self.clip_ranges = {"x": (0, x - 1), "y": (0, y - 1), "z": (0, z - 1)}
+
+            layout = QVBoxLayout(self)
+            layout.setSpacing(8)
+            layout.setContentsMargins(8, 8, 8, 8)
+
+            # Title
+            title = QLabel("<b>Clipping Planes</b>")
+            title.setStyleSheet("font-size: 13px;")
+            layout.addWidget(title)
+
+            desc = QLabel("Use range sliders to clip the volume on both sides of each axis.")
+            desc.setStyleSheet("color: #888; font-size: 10px;")
+            desc.setWordWrap(True)
+            layout.addWidget(desc)
+
+            # X clipping
+            x_group = QGroupBox("X Axis")
+            x_layout = QVBoxLayout(x_group)
+
+            x_header = QHBoxLayout()
+            self.x_enabled = QCheckBox("Enable")
+            self.x_enabled.toggled.connect(lambda v: self._toggle_clip("x", v))
+            x_header.addWidget(self.x_enabled)
+            x_header.addStretch()
+            self.x_label = QLabel(f"0 - {x-1}")
+            self.x_label.setStyleSheet("font-family: monospace;")
+            x_header.addWidget(self.x_label)
+            x_layout.addLayout(x_header)
+
+            self.x_slider = QRangeSlider(Qt.Horizontal)
+            self.x_slider.setRange(0, x - 1)
+            self.x_slider.setValue((0, x - 1))
+            self.x_slider.valueChanged.connect(lambda v: self._on_range_change("x", v))
+            x_layout.addWidget(self.x_slider)
+            layout.addWidget(x_group)
+
+            # Y clipping
+            y_group = QGroupBox("Y Axis")
+            y_layout = QVBoxLayout(y_group)
+
+            y_header = QHBoxLayout()
+            self.y_enabled = QCheckBox("Enable")
+            self.y_enabled.toggled.connect(lambda v: self._toggle_clip("y", v))
+            y_header.addWidget(self.y_enabled)
+            y_header.addStretch()
+            self.y_label = QLabel(f"0 - {y-1}")
+            self.y_label.setStyleSheet("font-family: monospace;")
+            y_header.addWidget(self.y_label)
+            y_layout.addLayout(y_header)
+
+            self.y_slider = QRangeSlider(Qt.Horizontal)
+            self.y_slider.setRange(0, y - 1)
+            self.y_slider.setValue((0, y - 1))
+            self.y_slider.valueChanged.connect(lambda v: self._on_range_change("y", v))
+            y_layout.addWidget(self.y_slider)
+            layout.addWidget(y_group)
+
+            # Z clipping
+            z_group = QGroupBox("Z Axis (Depth)")
+            z_layout = QVBoxLayout(z_group)
+
+            z_header = QHBoxLayout()
+            self.z_enabled = QCheckBox("Enable")
+            self.z_enabled.toggled.connect(lambda v: self._toggle_clip("z", v))
+            z_header.addWidget(self.z_enabled)
+            z_header.addStretch()
+            self.z_label = QLabel(f"0 - {z-1}")
+            self.z_label.setStyleSheet("font-family: monospace;")
+            z_header.addWidget(self.z_label)
+            z_layout.addLayout(z_header)
+
+            self.z_slider = QRangeSlider(Qt.Horizontal)
+            self.z_slider.setRange(0, z - 1)
+            self.z_slider.setValue((0, z - 1))
+            self.z_slider.valueChanged.connect(lambda v: self._on_range_change("z", v))
+            z_layout.addWidget(self.z_slider)
+            layout.addWidget(z_group)
+
+            # Reset button
+            reset_btn = QPushButton("Reset All")
+            reset_btn.clicked.connect(self._reset)
+            layout.addWidget(reset_btn)
+
+            layout.addStretch()
+
+        def _toggle_clip(self, axis: str, enabled: bool):
+            self.clip_enabled[axis] = enabled
+            self._apply_clipping()
+
+        def _on_range_change(self, axis: str, value: tuple):
+            min_v, max_v = value
+            self.clip_ranges[axis] = (min_v, max_v)
+            label = getattr(self, f"{axis}_label")
+            label.setText(f"{min_v} - {max_v}")
+            if self.clip_enabled[axis]:
+                self._apply_clipping()
+
+        def _apply_clipping(self):
+            """Apply clipping by masking data with NaN outside the range."""
+            for layer in viewer.layers:
+                if layer.name not in self.full_data:
+                    continue
+
+                full = self.full_data[layer.name].copy()
+                z, y, x = full.shape
+
+                # Apply each enabled clip - mask values OUTSIDE the range
+                if self.clip_enabled["x"]:
+                    x_min, x_max = self.clip_ranges["x"]
+                    full[:, :, :x_min] = np.nan
+                    full[:, :, x_max + 1:] = np.nan
+
+                if self.clip_enabled["y"]:
+                    y_min, y_max = self.clip_ranges["y"]
+                    full[:, :y_min, :] = np.nan
+                    full[:, y_max + 1:, :] = np.nan
+
+                if self.clip_enabled["z"]:
+                    z_min, z_max = self.clip_ranges["z"]
+                    full[:z_min, :, :] = np.nan
+                    full[z_max + 1:, :, :] = np.nan
+
+                layer.data = full
+
+        def _reset(self):
+            """Reset all clipping."""
+            # Block signals during reset
+            self.x_slider.blockSignals(True)
+            self.y_slider.blockSignals(True)
+            self.z_slider.blockSignals(True)
+
+            self.x_enabled.setChecked(False)
+            self.y_enabled.setChecked(False)
+            self.z_enabled.setChecked(False)
+
+            # Reset sliders to full range
+            self.x_slider.setValue((0, self.max_vals["x"]))
+            self.y_slider.setValue((0, self.max_vals["y"]))
+            self.z_slider.setValue((0, self.max_vals["z"]))
+
+            # Reset labels
+            self.x_label.setText(f"0 - {self.max_vals['x']}")
+            self.y_label.setText(f"0 - {self.max_vals['y']}")
+            self.z_label.setText(f"0 - {self.max_vals['z']}")
+
+            # Reset ranges
+            self.clip_ranges = {
+                "x": (0, self.max_vals["x"]),
+                "y": (0, self.max_vals["y"]),
+                "z": (0, self.max_vals["z"]),
+            }
+
+            self.x_slider.blockSignals(False)
+            self.y_slider.blockSignals(False)
+            self.z_slider.blockSignals(False)
+
+            # Restore full data
+            for layer in viewer.layers:
+                if layer.name in self.full_data:
+                    layer.data = self.full_data[layer.name].copy()
+
+    widget = ClippingWidget()
+    viewer.window.add_dock_widget(widget, name="Clipping", area="left")
+    return widget
+
+
+def _create_fl_z_offset_widget(viewer, loader, ht_data: np.ndarray, scale: tuple, initial_mode: str, crop_widget=None):
+    """Create widget for adjusting FL Z offset interactively.
+    
+    Uses napari's translate parameter instead of resampling data.
+    """
+    from qtpy.QtWidgets import (
+        QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
+        QSlider, QComboBox, QSizePolicy
+    )
+    from qtpy.QtCore import Qt
+
+    class FLZOffsetWidget(QWidget):
+        def __init__(self):
+            super().__init__()
+            self.fl_layers = {}
+            self.current_offset_um = 0.0
+
+            # Get registration params
+            self.reg_params = loader.reg_params
+            self.ht_z_total = ht_data.shape[0] * self.reg_params.ht_res_z
+
+            # Find FL layers
+            for ch_name in loader.fl_data.keys():
+                for layer in viewer.layers:
+                    if layer.name == ch_name:
+                        self.fl_layers[ch_name] = layer
+                        # Store initial translate
+                        layer._initial_translate = layer.translate
+                        break
+
+            if not self.fl_layers:
+                layout = QVBoxLayout(self)
+                layout.addWidget(QLabel("No fluorescence data available"))
+                layout.addStretch()
+                return
+
+            layout = QVBoxLayout(self)
+            layout.setSpacing(8)
+            layout.setContentsMargins(8, 8, 8, 8)
+
+            # Title
+            title = QLabel("<b>FL Z Alignment</b>")
+            title.setStyleSheet("font-size: 13px;")
+            layout.addWidget(title)
+
+            desc = QLabel("Adjust fluorescence Z position (no resampling).")
+            desc.setStyleSheet("color: #888; font-size: 10px;")
+            desc.setWordWrap(True)
+            layout.addWidget(desc)
+
+            layout.addSpacing(4)
+
+            # Offset slider
+            offset_row = QHBoxLayout()
+            offset_lbl = QLabel("Z Offset:")
+            offset_lbl.setFixedWidth(60)
+            offset_row.addWidget(offset_lbl)
+            self.offset_label = QLabel("0.0 µm")
+            self.offset_label.setStyleSheet("font-family: monospace; font-weight: bold;")
+            self.offset_label.setFixedWidth(80)
+            offset_row.addWidget(self.offset_label)
+            layout.addLayout(offset_row)
+
+            # Slider (range: full HT Z extent in both directions)
+            self.offset_range = self.ht_z_total
+            self.offset_slider = QSlider(Qt.Horizontal)
+            self.offset_slider.setRange(-1000, 1000)  # -100.0% to +100.0%
+            self.offset_slider.setValue(0)
+            self.offset_slider.valueChanged.connect(self._on_slider_change)
+            layout.addWidget(self.offset_slider)
+
+            # Range info
+            range_label = QLabel(f"Range: ±{self.offset_range:.1f} µm")
+            range_label.setStyleSheet("color: #888; font-size: 10px;")
+            layout.addWidget(range_label)
+
+            layout.addSpacing(8)
+
+            # Reset button
+            reset_btn = QPushButton("Reset")
+            reset_btn.clicked.connect(self._reset)
+            layout.addWidget(reset_btn)
+
+            layout.addStretch()
+
+        def _on_slider_change(self, value: int):
+            # Convert slider value to µm offset
+            self.current_offset_um = (value / 1000.0) * self.offset_range
+            self.offset_label.setText(f"{self.current_offset_um:+.1f} µm")
+            self._apply_offset()
+
+        def _apply_offset(self):
+            """Update FL layer translate to apply Z offset."""
+            for ch_name, layer in self.fl_layers.items():
+                initial = layer._initial_translate
+                # Only modify Z (first component)
+                new_translate = (
+                    initial[0] + self.current_offset_um,
+                    initial[1],
+                    initial[2]
+                )
+                layer.translate = new_translate
+
+        def _reset(self):
+            """Reset to initial position."""
+            self.current_offset_um = 0.0
+            self.offset_slider.setValue(0)
+            self.offset_label.setText("0.0 µm")
+            for ch_name, layer in self.fl_layers.items():
+                layer.translate = layer._initial_translate
+
+    widget = FLZOffsetWidget()
+    viewer.window.add_dock_widget(widget, name="FL Z Offset", area="right")
+    return widget
+
+
+def _create_animation_widget(viewer, output_dir: Path):
+    """Create animation export widget with turntable and slice sweep options."""
+    from qtpy.QtWidgets import (
+        QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
+        QSpinBox, QComboBox, QProgressBar, QSizePolicy, QGroupBox
+    )
+    from qtpy.QtCore import Qt, QTimer
+
+    class AnimationWidget(QWidget):
+        def __init__(self):
+            super().__init__()
+            self.exporter = AnimationExporter(viewer, output_dir)
+            self._export_timer: QTimer | None = None
+            self._export_mode: str = ""
+
+            layout = QVBoxLayout(self)
+            layout.setSpacing(8)
+            layout.setContentsMargins(8, 8, 8, 8)
+
+            # Title
+            title = QLabel("<b>Animation Export</b>")
+            title.setStyleSheet("font-size: 13px;")
+            layout.addWidget(title)
+
+            desc = QLabel("Export turntable or slice animations as GIF/MP4.")
+            desc.setStyleSheet("color: #888; font-size: 10px;")
+            desc.setWordWrap(True)
+            layout.addWidget(desc)
+
+            # Shared speed control at top
+            speed_row = QHBoxLayout()
+            speed_row.addWidget(QLabel("Speed:"))
+            self.speed_combo = QComboBox()
+            self.speed_combo.addItems(["Slow (150ms)", "Normal (100ms)", "Fast (50ms)"])
+            self.speed_combo.setCurrentIndex(1)
+            speed_row.addWidget(self.speed_combo)
+            speed_row.addStretch()
+            layout.addLayout(speed_row)
+
+            layout.addSpacing(4)
+
+            # Turntable section
+            turntable_group = QGroupBox("Turntable (360°)")
+            turntable_layout = QVBoxLayout(turntable_group)
+
+            # Frames control
+            frames_row = QHBoxLayout()
+            frames_row.addWidget(QLabel("Frames:"))
+            self.frames_spin = QSpinBox()
+            self.frames_spin.setRange(12, 360)
+            self.frames_spin.setValue(36)
+            self.frames_spin.setToolTip("Number of frames (36 = 10° per frame)")
+            frames_row.addWidget(self.frames_spin)
+            frames_row.addStretch()
+            turntable_layout.addLayout(frames_row)
+
+            # Export buttons
+            btn_row = QHBoxLayout()
+            self.gif_btn = QPushButton("Export GIF")
+            self.gif_btn.clicked.connect(lambda: self._export_turntable("gif"))
+            btn_row.addWidget(self.gif_btn)
+            self.mp4_btn = QPushButton("Export MP4")
+            self.mp4_btn.clicked.connect(lambda: self._export_turntable("mp4"))
+            btn_row.addWidget(self.mp4_btn)
+            turntable_layout.addLayout(btn_row)
+
+            layout.addWidget(turntable_group)
+
+            # Slice sweep section
+            sweep_group = QGroupBox("Slice Sweep")
+            sweep_layout = QVBoxLayout(sweep_group)
+
+            axis_row = QHBoxLayout()
+            axis_row.addWidget(QLabel("Axis:"))
+            self.axis_combo = QComboBox()
+            self.axis_combo.addItems(["Z (depth)", "Y (height)", "X (width)"])
+            axis_row.addWidget(self.axis_combo)
+            axis_row.addStretch()
+            sweep_layout.addLayout(axis_row)
+
+            sweep_btn_row = QHBoxLayout()
+            self.sweep_gif_btn = QPushButton("Export GIF")
+            self.sweep_gif_btn.clicked.connect(lambda: self._export_sweep("gif"))
+            sweep_btn_row.addWidget(self.sweep_gif_btn)
+            self.sweep_mp4_btn = QPushButton("Export MP4")
+            self.sweep_mp4_btn.clicked.connect(lambda: self._export_sweep("mp4"))
+            sweep_btn_row.addWidget(self.sweep_mp4_btn)
+            sweep_layout.addLayout(sweep_btn_row)
+
+            layout.addWidget(sweep_group)
+
+            # Progress bar
+            self.progress = QProgressBar()
+            self.progress.setVisible(False)
+            layout.addWidget(self.progress)
+
+            # Status
+            self.status = QLabel("")
+            self.status.setStyleSheet("color: #888; font-size: 10px;")
+            self.status.setWordWrap(True)
+            layout.addWidget(self.status)
+
+            layout.addStretch()
+
+        def _get_duration_ms(self) -> int:
+            idx = self.speed_combo.currentIndex()
+            return [150, 100, 50][idx]
+
+        def _export_turntable(self, fmt: str):
+            """Start turntable export using QTimer on main thread."""
+            if self._export_timer and self._export_timer.isActive():
+                return
+
+            from datetime import datetime
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"turntable_{timestamp}.{fmt}"
+
+            self.progress.setVisible(True)
+            self.progress.setValue(0)
+            self.progress.setMaximum(self.frames_spin.value())
+            self.status.setText("Exporting turntable animation...")
+            self._set_buttons_enabled(False)
+
+            # Initialize export
+            self.exporter.start_turntable_export(
+                filename, self.frames_spin.value(), self._get_duration_ms()
+            )
+            self._export_mode = "turntable"
+
+            # Use QTimer to capture frames on main thread
+            self._export_timer = QTimer()
+            self._export_timer.timeout.connect(self._capture_frame)
+            self._export_timer.start(50)  # Capture at ~20fps
+
+        def _export_sweep(self, fmt: str):
+            """Start slice sweep export using QTimer on main thread."""
+            if self._export_timer and self._export_timer.isActive():
+                return
+
+            from datetime import datetime
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            axis_name = ["z", "y", "x"][self.axis_combo.currentIndex()]
+            filename = f"sweep_{axis_name}_{timestamp}.{fmt}"
+
+            self.progress.setVisible(True)
+            self.progress.setValue(0)
+            self.status.setText("Exporting slice sweep animation...")
+            self._set_buttons_enabled(False)
+
+            # Initialize export - use shared speed control
+            n_slices = self.exporter.start_slice_sweep_export(
+                filename, self.axis_combo.currentIndex(), self._get_duration_ms()
+            )
+            self.progress.setMaximum(n_slices)
+            self._export_mode = "sweep"
+
+            # Use QTimer to capture frames on main thread
+            self._export_timer = QTimer()
+            self._export_timer.timeout.connect(self._capture_frame)
+            self._export_timer.start(30)  # Faster for slice sweeps
+
+        def _capture_frame(self):
+            """Capture one frame - called by QTimer on main thread."""
+            try:
+                if self._export_mode == "turntable":
+                    current, total, done = self.exporter.capture_turntable_frame()
+                else:
+                    current, total, done = self.exporter.capture_sweep_frame()
+
+                self.progress.setValue(current)
+
+                if done:
+                    self._export_timer.stop()
+                    try:
+                        path = self.exporter.finish_export()
+                        self._on_finished(str(path))
+                    except Exception as e:
+                        self._on_error(str(e))
+
+            except Exception as e:
+                self._export_timer.stop()
+                self.exporter.cancel_export()
+                self._on_error(str(e))
+
+        def _on_finished(self, path: str):
+            self.progress.setVisible(False)
+            self.status.setText(f"Saved: {path}")
+            self._set_buttons_enabled(True)
+
+        def _on_error(self, msg: str):
+            self.progress.setVisible(False)
+            self.status.setText(f"Error: {msg}")
+            self._set_buttons_enabled(True)
+
+        def _set_buttons_enabled(self, enabled: bool):
+            self.gif_btn.setEnabled(enabled)
+            self.mp4_btn.setEnabled(enabled)
+            self.sweep_gif_btn.setEnabled(enabled)
+            self.sweep_mp4_btn.setEnabled(enabled)
+
+    widget = AnimationWidget()
+    viewer.window.add_dock_widget(widget, name="Animation", area="right")
+    return widget
 
 
 def view_3d(
@@ -519,15 +1492,19 @@ def view_3d(
     show_slices: bool = False,
     rendering: str = "mip",
     screenshot: str | None = None,
+    enable_downsampling: bool = True,
+    z_offset_mode: str = "auto",
 ) -> None:
     """
     Open interactive 3D viewer for a TCF file.
-    
+
     Args:
         tcf_path: Path to TCF file
         show_slices: Start in 2D slice mode (default: 3D volume)
         rendering: Volume rendering - "mip", "attenuated_mip", "minip", "average"
         screenshot: Path to save screenshot
+        enable_downsampling: Auto-downsample during interaction for large volumes
+        z_offset_mode: FL Z alignment mode - "auto", "start", or "center"
     """
     try:
         import napari
@@ -536,25 +1513,27 @@ def view_3d(
             "napari is required for 3D viewing. Install with:\n"
             "  pip install 'tomocube-tools[3d]'"
         )
-    
+
     from tomocube.core.file import TCFFileLoader
-    from tomocube.processing.registration import register_fl_to_ht
-    
+
     tcf_path = Path(tcf_path)
-    
+
     with TCFFileLoader(str(tcf_path)) as loader:
         loader.load_timepoint(0)
-        
+
         ht_data = loader.data_3d.copy()
         scale = _get_voxel_scale(loader)
         title = f"TCF 3D: {tcf_path.stem}"
-        
+
+        # Track all layer data for downsampling
+        layers_data = {}
+
         # Create viewer
         viewer = napari.Viewer(title=title)
-        
+
         # Contrast limits
         p1, p99 = np.percentile(ht_data, [1, 99])
-        
+
         # Add HT volume
         ht_layer = viewer.add_image(
             ht_data,
@@ -566,48 +1545,111 @@ def view_3d(
             opacity=0.9,
             rendering=rendering,
         )
-        
+        layers_data["RI"] = ht_data
+
         if rendering == "attenuated_mip":
             ht_layer.attenuation = 0.5
-        
-        # Add FL channels
+
+        # Add FL channels using napari's native coordinate system
+        # FL and HT cover the same physical XY area (e.g., 230×230 µm) at different resolutions
+        # We use napari's scale/translate to overlay them without resampling
         if loader.has_fluorescence:
             colormaps = ["green", "magenta", "cyan", "yellow", "red", "blue"]
-            
+
+            rp = loader.reg_params
+            ht_z, ht_y, ht_x = ht_data.shape
+
+            # FL scale uses its own resolution (different from HT)
+            fl_scale = (rp.fl_res_z, rp.fl_res_y, rp.fl_res_x)
+
+            # Calculate physical FOV to verify alignment
+            ht_fov_x = ht_x * rp.ht_res_x
+            ht_fov_y = ht_y * rp.ht_res_y
+            ht_fov_z = ht_z * rp.ht_res_z
+
+            print(f"\n{'='*60}", flush=True)
+            print(f"FL Overlay (native resolution, no resampling)")
+            print(f"{'='*60}")
+            print(f"  HT: {ht_x}×{ht_y}×{ht_z} px @ {rp.ht_res_x:.4f} µm/px = {ht_fov_x:.1f}×{ht_fov_y:.1f}×{ht_fov_z:.1f} µm")
+
             for idx, (ch_name, fl_data) in enumerate(loader.fl_data.items()):
-                fl_registered = register_fl_to_ht(fl_data, ht_data.shape, loader.reg_params)
-                
-                fl_nonzero = fl_registered[fl_registered > 0]
+                fl_z, fl_y, fl_x = fl_data.shape
+                fl_fov_x = fl_x * rp.fl_res_x
+                fl_fov_y = fl_y * rp.fl_res_y
+                fl_fov_z = fl_z * rp.fl_res_z
+
+                print(f"  {ch_name}: {fl_x}×{fl_y}×{fl_z} px @ {rp.fl_res_x:.4f} µm/px = {fl_fov_x:.1f}×{fl_fov_y:.1f}×{fl_fov_z:.1f} µm")
+
+                # Get Z offset from file (physical µm offset)
+                ch_offset_z = rp.get_offset_z(ch_name)
+
+                # Determine Z translation based on mode
+                if z_offset_mode == "auto":
+                    # Center FL on HT volume
+                    z_translate = (ht_fov_z - fl_fov_z) / 2
+                    print(f"    Z: centered at {z_translate:.1f} µm (auto)")
+                elif z_offset_mode == "center":
+                    # OffsetZ is center of FL in HT space
+                    z_translate = ch_offset_z - fl_fov_z / 2
+                    print(f"    Z: center at {ch_offset_z:.1f} µm => translate {z_translate:.1f} µm")
+                else:  # "start"
+                    # OffsetZ is where FL starts in HT space
+                    z_translate = ch_offset_z
+                    print(f"    Z: starts at {ch_offset_z:.1f} µm")
+
+                # XY centering: both FOVs should match, but center anyway
+                # (handles any small FOV differences)
+                y_translate = (ht_fov_y - fl_fov_y) / 2
+                x_translate = (ht_fov_x - fl_fov_x) / 2
+
+                fl_translate = (z_translate, y_translate, x_translate)
+
+                fl_nonzero = fl_data[fl_data > 0]
                 if len(fl_nonzero) > 0:
                     fl_p1, fl_p99 = np.percentile(fl_nonzero, [5, 99.5])
                 else:
                     fl_p1, fl_p99 = 0, 1
-                
+
+                fl_copy = fl_data.astype(np.float32).copy()
                 viewer.add_image(
-                    fl_registered.copy(),
+                    fl_copy,
                     name=ch_name,
                     colormap=colormaps[idx % len(colormaps)],
                     contrast_limits=(fl_p1, fl_p99),
-                    scale=scale,
+                    scale=fl_scale,
+                    translate=fl_translate,
                     blending="additive",
                     opacity=0.8,
                     rendering=rendering,
                 )
-        
+                layers_data[ch_name] = fl_copy
+
+            print(f"{'='*60}\n", flush=True)
+
         # Scale bar
         viewer.scale_bar.visible = True
         viewer.scale_bar.unit = "µm"
         viewer.scale_bar.font_size = 14
-        
+
         # Hide napari's built-in layer list - we have our own
         viewer.window._qt_viewer.dockLayerList.setVisible(False)
         viewer.window._qt_viewer.dockLayerControls.setVisible(False)
-        
-        # Add control widgets (order determines stacking in right panel)
-        _create_camera_controls(viewer)
-        _create_layer_controls(viewer)
-        _create_crop_widget(viewer, ht_data, scale)
-        
+
+        # Add control widgets (order determines stacking)
+        _create_camera_controls(viewer)  # left
+        crop_widget = _create_crop_widget(viewer, ht_data, scale)  # left
+        _create_layer_controls(viewer)  # right
+        if loader.has_fluorescence:
+            # Pass crop_widget so FL alignment changes update the crop cache
+            _create_fl_z_offset_widget(viewer, loader, ht_data, scale, z_offset_mode, crop_widget)  # right
+        _create_animation_widget(viewer, tcf_path.parent)  # right
+
+        # Note: Interactive downsampling is disabled for now as it conflicts
+        # with crop/clipping widgets that also modify layer data.
+        # TODO: Implement proper coordination between downsampler and widgets
+        downsampler = None
+        volume_size = ht_data.size
+
         # Set view mode
         if show_slices:
             viewer.dims.ndisplay = 2
@@ -616,17 +1658,23 @@ def view_3d(
             viewer.dims.ndisplay = 3
             viewer.camera.angles = (0, -30, 45)
             viewer.camera.zoom = 0.8
-        
+
         # Print info
         z, y, x = ht_data.shape
-        print(f"\nVolume: {x} x {y} x {z} voxels")
-        print(f"Physical size: {x*scale[2]:.1f} x {y*scale[1]:.1f} x {z*scale[0]:.1f} um")
-        print(f"\nPress 2/3 to toggle between slice and 3D view.")
-        
+        print(f"\nVolume: {x} x {y} x {z} voxels ({volume_size / 1e6:.1f}M voxels)")
+        print(f"Physical size: {x*scale[2]:.1f} x {y*scale[1]:.1f} x {z*scale[0]:.1f} µm")
+        print(f"\nKeyboard shortcuts:")
+        print(f"  1-6: Camera presets (Top/Bottom/Front/Back/Left/Right)")
+        print(f"  0: Isometric view  |  R: Reset  |  F: Fit")
+        print(f"  +/-: Zoom  |  2/3: Toggle slice/3D view", flush=True)
+
         if screenshot:
-            import time
             time.sleep(0.5)
             viewer.screenshot(screenshot)
-            print(f"  Screenshot saved: {screenshot}")
-        
+            print(f"\n  Screenshot saved: {screenshot}")
+
         napari.run()
+
+        # Cleanup
+        if downsampler:
+            downsampler.disconnect()

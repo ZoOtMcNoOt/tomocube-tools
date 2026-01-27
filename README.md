@@ -477,9 +477,10 @@ except TCFParseError as e:
 
 ---
 
-## See Also
+## Documentation
 
-- [DATA_ANALYSIS.md](DATA_ANALYSIS.md) - Detailed TCF file format and data structure reference
+- **[INSTRUCTIONS.md](INSTRUCTIONS.md)** - Complete user guide with all commands, options, and troubleshooting
+- **[DATA_ANALYSIS.md](DATA_ANALYSIS.md)** - Detailed TCF file format and data structure reference
 
 ## License
 
