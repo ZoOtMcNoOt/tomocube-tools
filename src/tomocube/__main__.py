@@ -1232,7 +1232,7 @@ def _convert_gif(args: list[str]) -> int:
                     _print_error("No fluorescence data available for overlay mode")
                     return 1
                 with Spinner("Generating frames..."):
-                    result = export_overlay_gif(loader, output_path, fps=fps)
+                    result = export_overlay_gif(loader, output_path, axis=axis, fps=fps)
             else:
                 with Spinner("Generating frames..."):
                     result = export_to_gif(loader, output_path, axis=axis, fps=fps)

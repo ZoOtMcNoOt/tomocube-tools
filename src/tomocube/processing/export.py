@@ -327,6 +327,7 @@ def export_overlay_gif(
     loader: TCFFileLoader,
     output_path: str | Path,
     fl_channel: str = "CH0",
+    axis: str = "z",
     fps: int = 10,
     fl_alpha: float = 0.5,
     ht_cmap: str = "gray",
@@ -339,6 +340,7 @@ def export_overlay_gif(
         loader: TCFFileLoader with loaded data
         output_path: Output file path
         fl_channel: FL channel name
+        axis: Animation axis ("z", "y", or "x")
         fps: Frames per second
         fl_alpha: FL overlay alpha (0-1)
         ht_cmap: Colormap for HT
@@ -380,13 +382,34 @@ def export_overlay_gif(
     ht_cmap_obj = cm.get_cmap(ht_cmap)
     frames = []
 
-    for z in range(ht_data.shape[0]):
+    # Get number of slices based on axis
+    if axis.lower() == "z":
+        num_slices = ht_data.shape[0]
+    elif axis.lower() == "y":
+        num_slices = ht_data.shape[1]
+    elif axis.lower() == "x":
+        num_slices = ht_data.shape[2]
+    else:
+        raise ValueError(f"axis must be 'z', 'y', or 'x', got '{axis}'")
+
+    for i in range(num_slices):
+        # Get slices based on axis
+        if axis.lower() == "z":
+            ht_slice = ht_data[i]
+            fl_slice = fl_registered[i]
+        elif axis.lower() == "y":
+            ht_slice = ht_data[:, i, :]
+            fl_slice = fl_registered[:, i, :]
+        else:  # x
+            ht_slice = ht_data[:, :, i]
+            fl_slice = fl_registered[:, :, i]
+
         # HT slice
-        ht_norm = np.clip((ht_data[z] - ht_vmin) / (ht_vmax - ht_vmin), 0, 1)
+        ht_norm = np.clip((ht_slice - ht_vmin) / (ht_vmax - ht_vmin), 0, 1)
         ht_rgb = ht_cmap_obj(ht_norm)[:, :, :3]
 
         # FL slice (green overlay)
-        fl_norm = np.clip((fl_registered[z] - fl_vmin) / (fl_vmax - fl_vmin), 0, 1)
+        fl_norm = np.clip((fl_slice - fl_vmin) / (fl_vmax - fl_vmin), 0, 1)
         fl_rgb = np.zeros((*fl_norm.shape, 3))
         fl_rgb[:, :, 1] = fl_norm
 
