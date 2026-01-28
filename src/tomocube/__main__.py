@@ -616,7 +616,7 @@ def _print_help() -> None:
 
     # Footer
     print(_gradient_line(width))
-    print(f"  {s.DIM}Documentation: {s.RESET}{s.BRIGHT_BLACK}https://github.com/tomocube/tomocube-tools{s.RESET}")
+    print(f"  {s.DIM}Documentation: {s.RESET}{s.BRIGHT_BLACK}https://github.com/ZoOtMcNoOt/tomocube-tools{s.RESET}")
     print()
 
 
@@ -923,7 +923,15 @@ def main() -> int:
 
             viewer_main()
             return 0
-        with TCFViewer(file_path) as viewer:
+        
+        # Parse z-offset-mode if provided
+        z_offset_mode = "start"
+        for i, arg in enumerate(args_list):
+            if arg == "--z-offset-mode" and i + 1 < len(args_list):
+                z_offset_mode = args_list[i + 1]
+                break
+        
+        with TCFViewer(file_path, z_offset_mode=z_offset_mode) as viewer:
             viewer.show()
         return 0
 
@@ -935,7 +943,15 @@ def main() -> int:
 
             slice_main()
             return 0
-        viewer = SliceViewer(file_path)
+        
+        # Parse z-offset-mode if provided
+        z_offset_mode = "start"
+        for i, arg in enumerate(args_list):
+            if arg == "--z-offset-mode" and i + 1 < len(args_list):
+                z_offset_mode = args_list[i + 1]
+                break
+        
+        viewer = SliceViewer(file_path, z_offset_mode=z_offset_mode)
         viewer.show()
         return 0
 
@@ -1178,11 +1194,13 @@ def _convert_gif(args: list[str]) -> int:
                 ("--overlay", "", "Create HT+FL overlay animation"),
                 ("--fps", "<N>", "Frame rate (default: 10)"),
                 ("--axis", "<z|y|x>", "Slice axis for animation (default: z)"),
+                ("--z-offset-mode", "<mode>", "FL Z alignment: auto, start, center (default: start)"),
             ],
             [
                 ("Z-stack animation", "python -m tomocube gif sample.TCF"),
                 ("Custom frame rate", "python -m tomocube gif sample.TCF anim.gif --fps 15"),
                 ("HT+FL overlay", "python -m tomocube gif sample.TCF --overlay"),
+                ("FL centered", "python -m tomocube gif sample.TCF --overlay --z-offset-mode center"),
             ],
         )
         return 1
@@ -1192,6 +1210,7 @@ def _convert_gif(args: list[str]) -> int:
     overlay = False
     fps = 10
     axis = "z"
+    z_offset_mode = "start"
 
     i = 1
     while i < len(parts):
@@ -1203,6 +1222,9 @@ def _convert_gif(args: list[str]) -> int:
             i += 2
         elif parts[i] == "--axis" and i + 1 < len(parts):
             axis = parts[i + 1]
+            i += 2
+        elif parts[i] == "--z-offset-mode" and i + 1 < len(parts):
+            z_offset_mode = parts[i + 1]
             i += 2
         elif not output_path:
             output_path = parts[i]
@@ -1235,7 +1257,10 @@ def _convert_gif(args: list[str]) -> int:
                     _print_error("No fluorescence data available for overlay mode")
                     return 1
                 with Spinner("Generating frames..."):
-                    result = export_overlay_gif(loader, output_path, axis=axis, fps=fps)
+                    result = export_overlay_gif(
+                        loader, output_path, axis=axis, fps=fps,
+                        z_offset_mode=z_offset_mode
+                    )
             else:
                 with Spinner("Generating frames..."):
                     result = export_to_gif(loader, output_path, axis=axis, fps=fps)

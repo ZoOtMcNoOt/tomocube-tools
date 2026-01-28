@@ -96,6 +96,7 @@ class ViewerState:
     current_fl_channel: str | None = None
     fl_vmin: float = 0.0
     fl_vmax: float = 1.0
+    fl_z_offset_um: float = 0.0  # User-adjustable FL Z offset in µm
     
     def get_cmap(self) -> str:
         """Get current colormap name with optional inversion."""

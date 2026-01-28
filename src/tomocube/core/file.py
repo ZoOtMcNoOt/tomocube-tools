@@ -188,8 +188,8 @@ def load_registration_params(f: h5py.File) -> RegistrationParams:
         reg = _as_group(f[PATH_FL_REGISTRATION])
         if ATTR_REG_ROTATION in reg.attrs:
             params.rotation = float(np.asarray(reg.attrs[ATTR_REG_ROTATION])[0])
-        if ATTR_REG_SCALE in reg.attrs:
-            params.scale = float(np.asarray(reg.attrs[ATTR_REG_SCALE])[0])
+        # Note: params.scale from file is ignored - scaling is based purely on resolution ratios
+        # since both HT and FL cover the same physical FOV
         if ATTR_REG_TRANSLATION_X in reg.attrs:
             params.translation_x = float(np.asarray(reg.attrs[ATTR_REG_TRANSLATION_X])[0])
         if ATTR_REG_TRANSLATION_Y in reg.attrs:
@@ -198,26 +198,52 @@ def load_registration_params(f: h5py.File) -> RegistrationParams:
         logger.debug("FL registration path not found, using default parameters")
 
     # HT resolution
+    ht_using_defaults = False
     if PATH_DATA_3D in f:
         ht = _as_group(f[PATH_DATA_3D])
         if ATTR_RESOLUTION_X in ht.attrs:
             params.ht_res_x = float(np.asarray(ht.attrs[ATTR_RESOLUTION_X])[0])
+        else:
+            ht_using_defaults = True
         if ATTR_RESOLUTION_Y in ht.attrs:
             params.ht_res_y = float(np.asarray(ht.attrs[ATTR_RESOLUTION_Y])[0])
+        else:
+            ht_using_defaults = True
         if ATTR_RESOLUTION_Z in ht.attrs:
             params.ht_res_z = float(np.asarray(ht.attrs[ATTR_RESOLUTION_Z])[0])
+        else:
+            ht_using_defaults = True
+        if ht_using_defaults:
+            logger.warning(
+                f"Missing HT resolution attributes, using defaults "
+                f"(X={DEFAULT_HT_RES_X}, Y={DEFAULT_HT_RES_Y}, Z={DEFAULT_HT_RES_Z} µm/px). "
+                "These defaults are for HT-2H 60x objective."
+            )
     else:
         logger.debug("HT data path not found, using default resolution")
 
     # FL resolution
+    fl_using_defaults = False
     if PATH_DATA_3D_FL in f:
         fl = _as_group(f[PATH_DATA_3D_FL])
         if ATTR_RESOLUTION_X in fl.attrs:
             params.fl_res_x = float(np.asarray(fl.attrs[ATTR_RESOLUTION_X])[0])
+        else:
+            fl_using_defaults = True
         if ATTR_RESOLUTION_Y in fl.attrs:
             params.fl_res_y = float(np.asarray(fl.attrs[ATTR_RESOLUTION_Y])[0])
+        else:
+            fl_using_defaults = True
         if ATTR_RESOLUTION_Z in fl.attrs:
             params.fl_res_z = float(np.asarray(fl.attrs[ATTR_RESOLUTION_Z])[0])
+        else:
+            fl_using_defaults = True
+        if fl_using_defaults:
+            logger.warning(
+                f"Missing FL resolution attributes, using defaults "
+                f"(X={DEFAULT_FL_RES_X}, Y={DEFAULT_FL_RES_Y}, Z={DEFAULT_FL_RES_Z} µm/px). "
+                "These defaults are for HT-2H 60x objective."
+            )
     else:
         logger.debug("FL data path not found, using default resolution")
 

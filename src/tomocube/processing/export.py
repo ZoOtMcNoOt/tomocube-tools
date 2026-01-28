@@ -332,6 +332,7 @@ def export_overlay_gif(
     fl_alpha: float = 0.5,
     ht_cmap: str = "gray",
     loop: int = 0,
+    z_offset_mode: str = "start",
 ) -> Path:
     """
     Export HT + FL overlay as an animated GIF.
@@ -345,6 +346,10 @@ def export_overlay_gif(
         fl_alpha: FL overlay alpha (0-1)
         ht_cmap: Colormap for HT
         loop: Number of loops (0 = infinite)
+        z_offset_mode: How to interpret fl_offset_z:
+            - "start": OffsetZ is HT Z position where FL slice 0 starts (default)
+            - "center": OffsetZ is HT Z position of FL volume center
+            - "auto": Center FL on HT volume, ignoring OffsetZ
 
     Returns:
         Path to the saved GIF file
@@ -369,7 +374,10 @@ def export_overlay_gif(
 
     ht_data = loader.data_3d
     fl_raw = loader.fl_data[fl_channel]
-    fl_registered = register_fl_to_ht(fl_raw, ht_data.shape, loader.reg_params)
+    fl_registered = register_fl_to_ht(
+        fl_raw, ht_data.shape, loader.reg_params,
+        channel=fl_channel, z_offset_mode=z_offset_mode
+    )
 
     # Normalize
     ht_vmin, ht_vmax = np.percentile(ht_data, [1, 99])

@@ -28,126 +28,16 @@ Keyboard shortcuts:
 from __future__ import annotations
 
 import logging
-import threading
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
 import numpy as np
-from scipy.ndimage import zoom as scipy_zoom
 
 if TYPE_CHECKING:
     from tomocube.core.file import TCFFileLoader
 
 logger = logging.getLogger(__name__)
-
-
-# =============================================================================
-# Performance: Volume Downsampling for Interactive Mode
-# =============================================================================
-
-class InteractiveDownsampler:
-    """
-    Manages automatic downsampling during camera interaction for large volumes.
-
-    When the user rotates/zooms, we temporarily show a lower-resolution version
-    for smooth interaction, then restore full resolution when interaction stops.
-    """
-
-    def __init__(self, viewer, layers_data: dict, scale: tuple,
-                 downsample_factor: int = 2, debounce_ms: int = 300):
-        """
-        Args:
-            viewer: napari Viewer instance
-            layers_data: Dict mapping layer names to their full-resolution data
-            scale: Original voxel scale (z, y, x)
-            downsample_factor: Factor to reduce resolution by during interaction
-            debounce_ms: Milliseconds to wait after interaction stops before restoring
-        """
-        self.viewer = viewer
-        self.full_data = layers_data
-        self.scale = scale
-        self.factor = downsample_factor
-        self.debounce_ms = debounce_ms
-
-        self._is_downsampled = False
-        self._restore_timer = None
-        self._interaction_count = 0
-
-        # Pre-compute downsampled versions for speed
-        self._downsampled_data = {}
-        self._downsampled_scale = None
-        self._precompute_downsampled()
-
-        # Connect to camera events
-        self.viewer.camera.events.angles.connect(self._on_camera_change)
-        self.viewer.camera.events.zoom.connect(self._on_camera_change)
-        self.viewer.camera.events.center.connect(self._on_camera_change)
-
-    def _precompute_downsampled(self):
-        """Pre-compute downsampled volumes for all layers."""
-        factor = self.factor
-        inv_factor = 1.0 / factor
-
-        for name, data in self.full_data.items():
-            if data.ndim == 3 and data.size > 128**3:  # Only downsample large volumes
-                # Use order=1 (linear) for speed, order=0 (nearest) even faster
-                downsampled = scipy_zoom(data, inv_factor, order=1)
-                self._downsampled_data[name] = downsampled
-
-        # Adjust scale for downsampled data
-        self._downsampled_scale = tuple(s * factor for s in self.scale)
-
-    def _on_camera_change(self, event=None):
-        """Called when camera angles, zoom, or center changes."""
-        if not self._downsampled_data:
-            return  # No large volumes to downsample
-
-        self._interaction_count += 1
-        current_count = self._interaction_count
-
-        # Switch to downsampled immediately if not already
-        if not self._is_downsampled:
-            self._apply_downsampled()
-
-        # Cancel any pending restore
-        if self._restore_timer is not None:
-            self._restore_timer = None
-
-        # Schedule restore after debounce period
-        def schedule_restore():
-            time.sleep(self.debounce_ms / 1000.0)
-            # Only restore if no new interactions occurred
-            if current_count == self._interaction_count and self._is_downsampled:
-                self._restore_full()
-
-        self._restore_timer = threading.Thread(target=schedule_restore, daemon=True)
-        self._restore_timer.start()
-
-    def _apply_downsampled(self):
-        """Switch all layers to downsampled versions."""
-        for layer in self.viewer.layers:
-            if layer.name in self._downsampled_data:
-                layer.data = self._downsampled_data[layer.name]
-                layer.scale = self._downsampled_scale
-        self._is_downsampled = True
-
-    def _restore_full(self):
-        """Restore all layers to full resolution."""
-        for layer in self.viewer.layers:
-            if layer.name in self.full_data:
-                layer.data = self.full_data[layer.name]
-                layer.scale = self.scale
-        self._is_downsampled = False
-
-    def disconnect(self):
-        """Clean up event connections."""
-        try:
-            self.viewer.camera.events.angles.disconnect(self._on_camera_change)
-            self.viewer.camera.events.zoom.disconnect(self._on_camera_change)
-            self.viewer.camera.events.center.disconnect(self._on_camera_change)
-        except Exception:
-            pass
 
 
 # =============================================================================
@@ -664,6 +554,236 @@ def _create_layer_controls(viewer):
     
     widget = LayerControlsWidget()
     viewer.window.add_dock_widget(widget, name="Layers", area="right")
+    return widget
+
+
+def _create_histogram_widget(viewer):
+    """Create histogram widget for visualizing and adjusting layer contrast."""
+    from qtpy.QtWidgets import (
+        QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
+        QComboBox, QSizePolicy, QGroupBox
+    )
+    from qtpy.QtCore import Qt
+    
+    try:
+        import pyqtgraph as pg
+        HAS_PYQTGRAPH = True
+    except ImportError:
+        HAS_PYQTGRAPH = False
+    
+    class HistogramWidget(QWidget):
+        def __init__(self):
+            super().__init__()
+            self.current_layer = None
+            
+            layout = QVBoxLayout(self)
+            layout.setSpacing(8)
+            layout.setContentsMargins(8, 8, 8, 8)
+            
+            # Title
+            title = QLabel("<b>Histogram</b>")
+            title.setStyleSheet("font-size: 13px;")
+            layout.addWidget(title)
+            
+            desc = QLabel("View intensity distribution and adjust contrast.")
+            desc.setStyleSheet("color: #888; font-size: 10px;")
+            desc.setWordWrap(True)
+            layout.addWidget(desc)
+            
+            # Layer selector
+            layer_row = QHBoxLayout()
+            layer_lbl = QLabel("Layer:")
+            layer_lbl.setFixedWidth(40)
+            layer_row.addWidget(layer_lbl)
+            self.layer_combo = QComboBox()
+            self.layer_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            for layer in viewer.layers:
+                if hasattr(layer, 'data') and layer.data.ndim == 3:
+                    self.layer_combo.addItem(layer.name)
+            self.layer_combo.currentTextChanged.connect(self._on_layer_change)
+            layer_row.addWidget(self.layer_combo)
+            layout.addLayout(layer_row)
+            
+            layout.addSpacing(4)
+            
+            if HAS_PYQTGRAPH:
+                # Create pyqtgraph histogram widget
+                self.hist_widget = pg.PlotWidget()
+                self.hist_widget.setMinimumHeight(150)
+                self.hist_widget.setMaximumHeight(200)
+                self.hist_widget.setBackground('w')
+                self.hist_widget.showGrid(x=True, y=True, alpha=0.3)
+                self.hist_widget.setLabel('bottom', 'Intensity')
+                self.hist_widget.setLabel('left', 'Count')
+                self.hist_plot = self.hist_widget.plot(pen=pg.mkPen('b', width=1), fillLevel=0, brush=(100, 100, 255, 80))
+                
+                # Vertical lines for contrast limits
+                self.low_line = pg.InfiniteLine(pos=0, angle=90, movable=True, pen=pg.mkPen('r', width=2))
+                self.high_line = pg.InfiniteLine(pos=1, angle=90, movable=True, pen=pg.mkPen('g', width=2))
+                self.low_line.sigPositionChanged.connect(self._on_limit_change)
+                self.high_line.sigPositionChanged.connect(self._on_limit_change)
+                self.hist_widget.addItem(self.low_line)
+                self.hist_widget.addItem(self.high_line)
+                
+                layout.addWidget(self.hist_widget)
+            else:
+                # Fallback: text-based stats
+                self.stats_label = QLabel("Install pyqtgraph for histogram view:\npip install pyqtgraph")
+                self.stats_label.setStyleSheet("color: #888; font-family: monospace;")
+                self.stats_label.setWordWrap(True)
+                layout.addWidget(self.stats_label)
+            
+            # Stats display
+            self.info_label = QLabel("")
+            self.info_label.setStyleSheet("font-family: monospace; font-size: 10px;")
+            self.info_label.setWordWrap(True)
+            layout.addWidget(self.info_label)
+            
+            # Contrast limit display
+            limit_row = QHBoxLayout()
+            limit_lbl = QLabel("Limits:")
+            limit_lbl.setFixedWidth(40)
+            limit_row.addWidget(limit_lbl)
+            self.limit_label = QLabel("-- to --")
+            self.limit_label.setStyleSheet("font-family: monospace;")
+            limit_row.addWidget(self.limit_label)
+            limit_row.addStretch()
+            layout.addLayout(limit_row)
+            
+            # Preset buttons
+            preset_row = QHBoxLayout()
+            
+            auto_btn = QPushButton("Auto (1-99%)")
+            auto_btn.setToolTip("Set limits to 1st-99th percentile")
+            auto_btn.clicked.connect(lambda: self._apply_percentile(1, 99))
+            preset_row.addWidget(auto_btn)
+            
+            wide_btn = QPushButton("Wide (0.1-99.9%)")
+            wide_btn.setToolTip("Set limits to 0.1-99.9 percentile")
+            wide_btn.clicked.connect(lambda: self._apply_percentile(0.1, 99.9))
+            preset_row.addWidget(wide_btn)
+            
+            layout.addLayout(preset_row)
+            
+            preset_row2 = QHBoxLayout()
+            
+            boost_btn = QPushButton("Boost Weak (5-99.5%)")
+            boost_btn.setToolTip("For weak FL: set lower bound higher to see signal")
+            boost_btn.clicked.connect(lambda: self._apply_percentile(5, 99.5))
+            preset_row2.addWidget(boost_btn)
+            
+            full_btn = QPushButton("Full Range")
+            full_btn.setToolTip("Use full data range (min to max)")
+            full_btn.clicked.connect(self._apply_full_range)
+            preset_row2.addWidget(full_btn)
+            
+            layout.addLayout(preset_row2)
+            
+            layout.addStretch()
+            
+            # Initialize with first layer
+            if self.layer_combo.count() > 0:
+                self._on_layer_change(self.layer_combo.currentText())
+        
+        def _on_layer_change(self, layer_name: str):
+            """Update histogram for selected layer."""
+            for layer in viewer.layers:
+                if layer.name == layer_name:
+                    self.current_layer = layer
+                    self._update_histogram()
+                    break
+        
+        def _update_histogram(self):
+            """Recalculate and display histogram."""
+            if self.current_layer is None:
+                return
+            
+            data = self.current_layer.data
+            if data is None or data.size == 0:
+                return
+            
+            # Flatten and sample for performance (max 1M points)
+            flat = data.ravel()
+            if len(flat) > 1_000_000:
+                flat = np.random.choice(flat, 1_000_000, replace=False)
+            
+            # Calculate stats
+            d_min, d_max = float(np.min(data)), float(np.max(data))
+            d_mean = float(np.mean(flat))
+            d_std = float(np.std(flat))
+            nonzero = flat[flat > 0]
+            nonzero_pct = len(nonzero) / len(flat) * 100 if len(flat) > 0 else 0
+            
+            # Percentiles
+            p1, p50, p99 = np.percentile(flat, [1, 50, 99])
+            
+            self.info_label.setText(
+                f"Min: {d_min:.2f}  Max: {d_max:.2f}\n"
+                f"Mean: {d_mean:.2f}  Std: {d_std:.2f}\n"
+                f"1%: {p1:.2f}  50%: {p50:.2f}  99%: {p99:.2f}\n"
+                f"Non-zero: {nonzero_pct:.1f}%"
+            )
+            
+            if HAS_PYQTGRAPH:
+                # Calculate histogram
+                # Use log-scale friendly binning for FL data
+                if d_max > 0:
+                    hist, bin_edges = np.histogram(flat, bins=200, range=(d_min, d_max))
+                    bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
+                    # Use log scale for counts (add 1 to avoid log(0))
+                    hist_log = np.log1p(hist)
+                    self.hist_plot.setData(bin_centers, hist_log)
+                    
+                    # Update limit lines
+                    if hasattr(self.current_layer, 'contrast_limits'):
+                        low, high = self.current_layer.contrast_limits
+                        self.low_line.blockSignals(True)
+                        self.high_line.blockSignals(True)
+                        self.low_line.setValue(low)
+                        self.high_line.setValue(high)
+                        self.low_line.blockSignals(False)
+                        self.high_line.blockSignals(False)
+                        self.limit_label.setText(f"{low:.2f} to {high:.2f}")
+                    
+                    # Set X range to data range
+                    self.hist_widget.setXRange(d_min, d_max)
+        
+        def _on_limit_change(self):
+            """Apply contrast limits from draggable lines."""
+            if self.current_layer is None or not hasattr(self.current_layer, 'contrast_limits'):
+                return
+            
+            low = self.low_line.value()
+            high = self.high_line.value()
+            
+            # Ensure low < high
+            if low >= high:
+                return
+            
+            self.current_layer.contrast_limits = (low, high)
+            self.limit_label.setText(f"{low:.2f} to {high:.2f}")
+        
+        def _apply_percentile(self, low_pct: float, high_pct: float):
+            """Apply percentile-based contrast limits."""
+            if self.current_layer is None or not hasattr(self.current_layer, 'contrast_limits'):
+                return
+            
+            data = self.current_layer.data
+            low, high = np.percentile(data, [low_pct, high_pct])
+            self.current_layer.contrast_limits = (low, high)
+            self._update_histogram()
+        
+        def _apply_full_range(self):
+            """Apply full data range as contrast limits."""
+            if self.current_layer is None or not hasattr(self.current_layer, 'contrast_limits'):
+                return
+            
+            data = self.current_layer.data
+            self.current_layer.contrast_limits = (float(np.min(data)), float(np.max(data)))
+            self._update_histogram()
+    
+    widget = HistogramWidget()
+    viewer.window.add_dock_widget(widget, name="Histogram", area="right")
     return widget
 
 
@@ -1637,16 +1757,11 @@ def view_3d(
         _create_camera_controls(viewer)  # left
         crop_widget = _create_crop_widget(viewer, ht_data, scale)  # left
         _create_layer_controls(viewer)  # right
+        _create_histogram_widget(viewer)  # right - for contrast adjustment
         if loader.has_fluorescence:
             # Pass crop_widget so FL alignment changes update the crop cache
             _create_fl_z_offset_widget(viewer, loader, ht_data, scale, z_offset_mode, crop_widget)  # right
         _create_animation_widget(viewer, tcf_path.parent)  # right
-
-        # Note: Interactive downsampling is disabled for now as it conflicts
-        # with crop/clipping widgets that also modify layer data.
-        # TODO: Implement proper coordination between downsampler and widgets
-        downsampler = None
-        volume_size = ht_data.size
 
         # Set view mode
         if show_slices:
@@ -1659,6 +1774,7 @@ def view_3d(
 
         # Print info
         z, y, x = ht_data.shape
+        volume_size = ht_data.size
         print(f"\nVolume: {x} x {y} x {z} voxels ({volume_size / 1e6:.1f}M voxels)")
         print(f"Physical size: {x*scale[2]:.1f} x {y*scale[1]:.1f} x {z*scale[0]:.1f} µm")
         print(f"\nKeyboard shortcuts:")
@@ -1672,7 +1788,3 @@ def view_3d(
             print(f"\n  Screenshot saved: {screenshot}")
 
         napari.run()
-
-        # Cleanup
-        if downsampler:
-            downsampler.disconnect()

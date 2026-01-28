@@ -49,7 +49,7 @@ def _apply_affine_transform_2d(
     ht_center_y, ht_center_x = ht_h / 2, ht_w / 2
 
     # Resolution ratios (FL pixels per HT pixel)
-    # If FL has lower resolution (larger um/pixel), fewer FL pixels cover same physical space
+    # Both HT and FL cover the same physical FOV, so scaling is purely based on resolution
     scale_y = params.fl_res_y / params.ht_res_y  # FL pixels per HT pixel in Y
     scale_x = params.fl_res_x / params.ht_res_x  # FL pixels per HT pixel in X
 
@@ -58,21 +58,16 @@ def _apply_affine_transform_2d(
     #
     # Forward: FL -> HT
     #   1. Translate FL to origin (center)
-    #   2. Scale to physical coords
+    #   2. Scale by resolution ratio
     #   3. Rotate
-    #   4. Apply scale correction
-    #   5. Translate by offset
-    #   6. Scale to HT pixel coords
-    #   7. Translate to HT center
+    #   4. Translate by offset
+    #   5. Scale to HT pixel coords
+    #   6. Translate to HT center
     #
     # We need inverse: HT -> FL
 
     cos_r = np.cos(params.rotation)
     sin_r = np.sin(params.rotation)
-
-    # Combined scale: resolution ratio * scale correction factor
-    total_scale_y = scale_y * params.scale
-    total_scale_x = scale_x * params.scale
 
     # Translation in FL pixels
     trans_y = params.translation_y / params.fl_res_y
@@ -97,10 +92,10 @@ def _apply_affine_transform_2d(
         [-sin_r, cos_r]
     ])
 
-    # Scale matrix (inverse)
+    # Scale matrix (inverse) - just resolution ratios
     S_inv = np.array([
-        [total_scale_y, 0],
-        [0, total_scale_x]
+        [scale_y, 0],
+        [0, scale_x]
     ])
 
     # Combined rotation and scale
@@ -140,10 +135,12 @@ def register_fl_to_ht(
 
     Applies the full affine transformation including:
     - Rotation (from params.rotation)
-    - Scale correction (from params.scale)
     - XY translation (from params.translation_x, translation_y)
-    - Resolution resampling (FL and HT have different pixel sizes)
+    - Resolution resampling (FL and HT have different pixel sizes but same FOV)
     - Z-axis interpolation (for 3D data)
+
+    Note: Scaling is determined purely by resolution ratios since both HT and FL
+    cover the same physical field of view (typically 230×230 µm).
 
     Args:
         fl_data: 2D slice (Y, X) or 3D volume (Z, Y, X)

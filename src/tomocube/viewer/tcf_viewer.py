@@ -116,8 +116,15 @@ class TCFViewer:
     DARK_BG = "#1e1e1e"
     DARK_FG = "#2d2d2d"
 
-    def __init__(self, tcf_path: str):
+    def __init__(self, tcf_path: str, z_offset_mode: str = "start"):
+        """Initialize the TCF viewer.
+        
+        Args:
+            tcf_path: Path to TCF file
+            z_offset_mode: FL Z alignment mode ("start", "center", or "auto")
+        """
         self.tcf_path = Path(tcf_path)
+        self.z_offset_mode = z_offset_mode
 
         # Component classes
         self._loader: TCFFileLoader | None = None
@@ -188,28 +195,37 @@ class TCFViewer:
         """Load TCF file using TCFFileLoader component."""
         self._loader = TCFFileLoader(self.tcf_path)
         self._loader.load()
+        
+        # Load first timepoint so data_3d is available
+        self._loader.load_timepoint(0)
+        self.s.current_timepoint = 0
 
         if self._loader.has_fluorescence:
-            self._fl_mapper = FluorescenceMapper(self._loader.reg_params)
-            self.s.current_fl_channel = self._loader.fl_channels[0]
+            # Get FL shape for offset mode calculation
+            ch = self._loader.fl_channels[0]
+            fl_shape = self._loader.fl_data[ch].shape if ch in self._loader.fl_data else None
+            ht_shape = self._loader.data_3d.shape
+            
+            self._fl_mapper = FluorescenceMapper(
+                self._loader.reg_params,
+                z_offset_mode=self.z_offset_mode,
+                fl_shape=fl_shape,
+                ht_shape=ht_shape,
+            )
+            self.s.current_fl_channel = ch
+            self.s.fl_vmin, self.s.fl_vmax = self._loader.get_fl_contrast(ch)
 
-        self._load_timepoint(0)
+        # Initialize position and contrast
+        shape = self._loader.data_3d.shape
+        self.s.current_z = shape[0] // 2
+        self.s.current_y = shape[1] // 2
+        self.s.current_x = shape[2] // 2
+        self._auto_contrast_global()
 
     def _load_timepoint(self, idx: int) -> None:
         """Load data for a specific timepoint."""
         self.loader.load_timepoint(idx)
         self.s.current_timepoint = idx
-
-        shape = self.loader.data_3d.shape
-        self.s.current_z = shape[0] // 2
-        self.s.current_y = shape[1] // 2
-        self.s.current_x = shape[2] // 2
-
-        ch = self.s.current_fl_channel
-        if ch and ch in self.loader.fl_data:
-            self.s.fl_vmin, self.s.fl_vmax = self.loader.get_fl_contrast(ch)
-
-        self._auto_contrast_global()
 
     # =========================================================================
     # Display Helpers
@@ -235,19 +251,37 @@ class TCFViewer:
         return f"{val:.4f}"
 
     def _get_extent_xy(self) -> list[float]:
-        """Get extent for XY view in micrometers."""
+        """Get extent for HT XY view in micrometers."""
         shape = self.loader.data_3d.shape
         return [0, shape[2] * self.res_xy, shape[1] * self.res_xy, 0]
 
     def _get_extent_xz(self) -> list[float]:
-        """Get extent for XZ view in micrometers."""
+        """Get extent for HT XZ view in micrometers."""
         shape = self.loader.data_3d.shape
         return [0, shape[2] * self.res_xy, shape[0] * self.res_z, 0]
 
     def _get_extent_yz(self) -> list[float]:
-        """Get extent for YZ view in micrometers."""
+        """Get extent for HT YZ view in micrometers."""
         shape = self.loader.data_3d.shape
         return [0, shape[1] * self.res_xy, shape[0] * self.res_z, 0]
+
+    def _get_fl_extent_xy(self) -> list[float]:
+        """Get extent for FL XY view in physical coordinates."""
+        if self._fl_mapper is None:
+            return self._get_extent_xy()
+        return self._fl_mapper.get_fl_xy_extent()
+
+    def _get_fl_extent_xz(self) -> list[float]:
+        """Get extent for FL XZ view in physical coordinates."""
+        if self._fl_mapper is None:
+            return self._get_extent_xz()
+        return self._fl_mapper.get_fl_xz_extent()
+
+    def _get_fl_extent_yz(self) -> list[float]:
+        """Get extent for FL YZ view in physical coordinates."""
+        if self._fl_mapper is None:
+            return self._get_extent_yz()
+        return self._fl_mapper.get_fl_yz_extent()
 
     # =========================================================================
     # Figure Setup
@@ -343,6 +377,19 @@ class TCFViewer:
             self.fl_alpha_slider.label.set_color("white")
             self.fl_alpha_slider.valtext.set_color("white")
             self.fl_alpha_slider.on_changed(self._on_fl_alpha_change)
+            
+            # FL Z offset slider - adjust FL position relative to HT
+            y_pos -= (slider_h + slider_gap)
+            # Range: full HT Z extent in both directions
+            fov_z = data.shape[0] * self.res_z
+            ax_fl_z = self.fig.add_axes((0.05, y_pos, 0.38, slider_h), facecolor=self.DARK_FG)
+            self.fl_z_offset_slider = Slider(
+                ax_fl_z, "FL Z (μm)", -fov_z, fov_z,
+                valinit=0, color=fl_color
+            )
+            self.fl_z_offset_slider.label.set_color("white")
+            self.fl_z_offset_slider.valtext.set_color("white")
+            self.fl_z_offset_slider.on_changed(self._on_fl_z_offset_change)
 
         # Timepoint slider (right side, only if multiple timepoints)
         if len(self.loader.timepoints) > 1:
@@ -502,11 +549,11 @@ class TCFViewer:
         vline = ax.axvline(x=x, color="#50c878", lw=0.8, alpha=0.7)
         self._crosshairs[view_id] = {"h": hline, "v": vline}
 
-    def _setup_fl_overlay(self, ax, plane: str, extent: list[float]) -> None:
-        """Set up FL overlay image (initially transparent).
+    def _setup_fl_overlay(self, ax, plane: str, ht_extent: list[float]) -> None:
+        """Set up FL overlay image at native resolution with physical coordinates.
 
-        Always creates the overlay image to ensure toggle works correctly,
-        even if current slice has no FL data (uses zeros in that case).
+        FL is displayed at its native resolution using its own physical extent,
+        overlaid on the HT view. This preserves the true spatial relationship.
         """
         if not self.loader.has_fluorescence:
             return
@@ -516,26 +563,32 @@ class TCFViewer:
             return
 
         fl_3d = self.loader.fl_data[ch]
-        ht_shape = self.loader.data_3d.shape
 
         if plane == "xy":
-            fl_slice = self._get_fl_xy_slice(fl_3d)
-            # Always create overlay - use zeros if no data for this slice
-            if fl_slice is None:
-                fl_slice = np.zeros((ht_shape[1], ht_shape[2]), dtype=np.float32)
-            fl_rgba = self._create_fl_rgba(fl_slice, cache_key="xy")
-            self._im_fl_xy = ax.imshow(fl_rgba, extent=extent, aspect="equal")
+            result = self._get_fl_xy_slice_native(fl_3d)
+            fl_extent = self._get_fl_extent_xy()
+            fl_rgba = self._create_fl_rgba(result.data, cache_key="xy")
+            self._im_fl_xy = ax.imshow(fl_rgba, extent=fl_extent, aspect="equal")
             self._im_fl_xy.set_visible(self.s.show_fluorescence)
+            # Set axis limits to HT extent so FL appears in correct position
+            ax.set_xlim(ht_extent[0], ht_extent[1])
+            ax.set_ylim(ht_extent[2], ht_extent[3])
         elif plane == "xz":
-            fl_slice = self._get_fl_xz_slice(fl_3d)
-            fl_rgba = self._create_fl_rgba(fl_slice, cache_key="xz")
-            self._im_fl_xz = ax.imshow(fl_rgba, extent=extent, aspect="auto")
+            result = self._get_fl_xz_slice_native(fl_3d)
+            fl_extent = self._get_fl_extent_xz()
+            fl_rgba = self._create_fl_rgba(result.data, cache_key="xz")
+            self._im_fl_xz = ax.imshow(fl_rgba, extent=fl_extent, aspect="auto")
             self._im_fl_xz.set_visible(self.s.show_fluorescence)
+            ax.set_xlim(ht_extent[0], ht_extent[1])
+            ax.set_ylim(ht_extent[2], ht_extent[3])
         else:  # yz
-            fl_slice = self._get_fl_yz_slice(fl_3d)
-            fl_rgba = self._create_fl_rgba(fl_slice, cache_key="yz")
-            self._im_fl_yz = ax.imshow(fl_rgba, extent=extent, aspect="auto")
+            result = self._get_fl_yz_slice_native(fl_3d)
+            fl_extent = self._get_fl_extent_yz()
+            fl_rgba = self._create_fl_rgba(result.data, cache_key="yz")
+            self._im_fl_yz = ax.imshow(fl_rgba, extent=fl_extent, aspect="auto")
             self._im_fl_yz.set_visible(self.s.show_fluorescence)
+            ax.set_xlim(ht_extent[0], ht_extent[1])
+            ax.set_ylim(ht_extent[2], ht_extent[3])
 
     def _create_fl_rgba(self, fl_slice: np.ndarray, cache_key: str | None = None) -> np.ndarray:
         """Create RGBA array for FL overlay with optional caching."""
@@ -627,31 +680,27 @@ class TCFViewer:
         self._update_info_text()
 
     def _update_fl_overlays(self) -> None:
-        """Update FL overlay data with caching."""
+        """Update FL overlay data at native resolution."""
         ch = self.s.current_fl_channel
         if ch is None or ch not in self.loader.fl_data:
             return
 
         fl_3d = self.loader.fl_data[ch]
-        ht_shape = self.loader.data_3d.shape
 
         # Invalidate cache when position changes
         self._invalidate_fl_cache()
 
         if self._im_fl_xy is not None:
-            fl_slice = self._get_fl_xy_slice(fl_3d)
-            # Use zeros if no FL data for this slice
-            if fl_slice is None:
-                fl_slice = np.zeros((ht_shape[1], ht_shape[2]), dtype=np.float32)
-            self._im_fl_xy.set_data(self._create_fl_rgba(fl_slice, cache_key="xy"))
+            result = self._get_fl_xy_slice_native(fl_3d)
+            self._im_fl_xy.set_data(self._create_fl_rgba(result.data, cache_key="xy"))
 
         if self._im_fl_xz is not None:
-            fl_slice = self._get_fl_xz_slice(fl_3d)
-            self._im_fl_xz.set_data(self._create_fl_rgba(fl_slice, cache_key="xz"))
+            result = self._get_fl_xz_slice_native(fl_3d)
+            self._im_fl_xz.set_data(self._create_fl_rgba(result.data, cache_key="xz"))
 
         if self._im_fl_yz is not None:
-            fl_slice = self._get_fl_yz_slice(fl_3d)
-            self._im_fl_yz.set_data(self._create_fl_rgba(fl_slice, cache_key="yz"))
+            result = self._get_fl_yz_slice_native(fl_3d)
+            self._im_fl_yz.set_data(self._create_fl_rgba(result.data, cache_key="yz"))
 
     def _update_contrast(self) -> None:
         """Update contrast/colormap without redrawing everything."""
@@ -727,9 +776,36 @@ class TCFViewer:
         self.info_text.set_text("  |  ".join(parts))
 
     # =========================================================================
-    # Fluorescence Helpers
+    # Fluorescence Helpers - Native Resolution
     # =========================================================================
 
+    def _get_fl_xy_slice_native(self, fl_3d: np.ndarray):
+        """Get FL XY slice at native resolution with physical extent."""
+        from tomocube.viewer.components import FlSliceResult
+        if self._fl_mapper is None:
+            empty = np.zeros((fl_3d.shape[1], fl_3d.shape[2]), dtype=np.float32)
+            return FlSliceResult(data=empty, extent=[0, 0, 0, 0], in_range=False)
+        return self._fl_mapper.get_xy_slice_native(fl_3d, self.s.current_z)
+
+    def _get_fl_xz_slice_native(self, fl_3d: np.ndarray):
+        """Get FL XZ slice at native resolution with physical extent."""
+        from tomocube.viewer.components import FlSliceResult
+        if self._fl_mapper is None:
+            empty = np.zeros((fl_3d.shape[0], fl_3d.shape[2]), dtype=np.float32)
+            return FlSliceResult(data=empty, extent=[0, 0, 0, 0], in_range=False)
+        y_um = self.s.current_y * self.res_xy
+        return self._fl_mapper.get_xz_slice_native(fl_3d, y_um)
+
+    def _get_fl_yz_slice_native(self, fl_3d: np.ndarray):
+        """Get FL YZ slice at native resolution with physical extent."""
+        from tomocube.viewer.components import FlSliceResult
+        if self._fl_mapper is None:
+            empty = np.zeros((fl_3d.shape[0], fl_3d.shape[1]), dtype=np.float32)
+            return FlSliceResult(data=empty, extent=[0, 0, 0, 0], in_range=False)
+        x_um = self.s.current_x * self.res_xy
+        return self._fl_mapper.get_yz_slice_native(fl_3d, x_um)
+
+    # Legacy methods (deprecated - use native versions)
     def _get_fl_xy_slice(self, fl_3d: np.ndarray) -> np.ndarray | None:
         if self._fl_mapper is None:
             return None
@@ -782,6 +858,29 @@ class TCFViewer:
         self.s.fl_overlay_alpha = val
         if self.s.show_fluorescence:
             self._update_fl_overlays()
+            self.fig.canvas.draw_idle()
+
+    def _on_fl_z_offset_change(self, val: float) -> None:
+        """Handle FL Z offset slider change."""
+        self.s.fl_z_offset_um = val
+        # Update the FL mapper's effective offset
+        if self._fl_mapper is not None:
+            # Recalculate effective offset with user adjustment
+            base_offset = self._fl_mapper._compute_effective_offset(
+                self.z_offset_mode,
+                self._fl_mapper.fl_shape,
+                self._fl_mapper.ht_shape,
+            )
+            self._fl_mapper.effective_offset_z = base_offset + val
+        if self.s.show_fluorescence:
+            self._update_fl_overlays()
+            # Update FL extent for all views
+            if self._im_fl_xy is not None:
+                self._im_fl_xy.set_extent(self._get_fl_extent_xy())
+            if self._im_fl_xz is not None:
+                self._im_fl_xz.set_extent(self._get_fl_extent_xz())
+            if self._im_fl_yz is not None:
+                self._im_fl_yz.set_extent(self._get_fl_extent_yz())
             self.fig.canvas.draw_idle()
 
     def _on_timepoint_change(self, val: float) -> None:
