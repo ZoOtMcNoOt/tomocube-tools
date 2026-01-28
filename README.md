@@ -235,15 +235,6 @@ sample.TCF (HDF5)
     └── SoftwareVersion     # Processing software version
 ```
 
-### Supported Instruments
-
-The tool auto-detects instrument model and uses appropriate defaults:
-
-| Model | XY Res (µm) | Z Res (µm) | Notes |
-|-------|-------------|------------|-------|
-| HTX | 0.196 | 0.839 | Default configuration |
-| HT-2H-60x | 0.196 | 0.839 | 60x objective |
-
 ---
 
 ## Python API Reference
