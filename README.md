@@ -1,6 +1,6 @@
 # Tomocube Tools
 
-[![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
+[![Python 3.9+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 Python library for working with Tomocube TCF (Tomocube Cell File) holotomography data.
@@ -393,8 +393,6 @@ src/tomocube/
 
 - **[INSTRUCTIONS.md](INSTRUCTIONS.md)** - Complete user guide with detailed options
 - **[DATA_ANALYSIS.md](DATA_ANALYSIS.md)** - TCF file format and data structure reference
-- **[TODO.md](TODO.md)** - Development roadmap and technical debt
-
 ---
 
 ## License
