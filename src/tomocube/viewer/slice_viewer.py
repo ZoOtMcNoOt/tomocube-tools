@@ -296,6 +296,10 @@ class SliceViewer:
         self.slider.valtext.set_color("white")
         self.slider.on_changed(self._update_slice)
 
+        # Track active slider for arrow key control
+        self._active_slider = self.slider
+        self._sliders: list[Slider] = [self.slider]
+
         # FL Z offset slider (if FL data available)
         if self.has_fl:
             # Use HT FOV as offset range
@@ -309,6 +313,10 @@ class SliceViewer:
             self.fl_z_offset_slider.valtext.set_color("white")
             self.fl_z_offset_slider.on_changed(self._on_fl_z_offset_change)
             self.fl_z_offset_um = 0.0
+            self._sliders.append(self.fl_z_offset_slider)
+
+        # Connect click event for slider focus
+        self.fig.canvas.mpl_connect("button_press_event", self._on_click)
 
         # Navigation buttons
         ax_prev = self.fig.add_axes((0.15, 0.14, 0.08, 0.04))
@@ -383,18 +391,36 @@ class SliceViewer:
         if self.current_z < self.ht_3d.shape[0] - 1:
             self.slider.set_val((self.current_z + 1) * self.res_z)
 
+    def _on_click(self, event: object) -> None:
+        """Handle mouse clicks to set active slider."""
+        if event is None or getattr(event, 'inaxes', None) is None:
+            return
+        # Check if click is on any slider axis
+        for slider in self._sliders:
+            if event.inaxes == slider.ax:
+                self._active_slider = slider
+                break
+
+    def _adjust_slider(self, delta: float) -> None:
+        """Adjust active slider by delta (as fraction of range)."""
+        slider = self._active_slider
+        range_size = slider.valmax - slider.valmin
+        step = range_size * delta
+        new_val = np.clip(slider.val + step, slider.valmin, slider.valmax)
+        slider.set_val(new_val)
+
     def _on_key(self, event: object) -> None:
         """Handle keyboard events."""
         key = getattr(event, "key", "")
 
         if key in ("left", "down"):
-            self._prev_slice()
+            self._adjust_slider(-0.02)  # 2% step
         elif key in ("right", "up"):
-            self._next_slice()
+            self._adjust_slider(0.02)
         elif key == "home":
-            self.slider.set_val(0)
+            self._active_slider.set_val(self._active_slider.valmin)
         elif key == "end":
-            self.slider.set_val((self.ht_3d.shape[0] - 1) * self.res_z)
+            self._active_slider.set_val(self._active_slider.valmax)
         elif key in ("q", "escape"):
             plt.close(self.fig)
 

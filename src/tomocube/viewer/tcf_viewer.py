@@ -348,6 +348,10 @@ class TCFViewer:
         self.z_slider.valtext.set_color("white")
         self.z_slider.on_changed(self._on_z_change)
 
+        # Track active slider for arrow key control (RangeSlider excluded)
+        self._active_slider: Slider = self.z_slider
+        self._sliders: list[Slider] = [self.z_slider]
+
         # Y slider - show in micrometers
         y_pos -= (slider_h + slider_gap)
         y_um_max = y_max * self.res_xy
@@ -358,6 +362,7 @@ class TCFViewer:
         self.y_slider.label.set_color("white")
         self.y_slider.valtext.set_color("white")
         self.y_slider.on_changed(self._on_y_change)
+        self._sliders.append(self.y_slider)
 
         # Contrast slider - show RI values
         y_pos -= (slider_h + slider_gap)
@@ -377,6 +382,7 @@ class TCFViewer:
             self.fl_alpha_slider.label.set_color("white")
             self.fl_alpha_slider.valtext.set_color("white")
             self.fl_alpha_slider.on_changed(self._on_fl_alpha_change)
+            self._sliders.append(self.fl_alpha_slider)
             
             # FL Z offset slider - adjust FL position relative to HT
             y_pos -= (slider_h + slider_gap)
@@ -390,6 +396,7 @@ class TCFViewer:
             self.fl_z_offset_slider.label.set_color("white")
             self.fl_z_offset_slider.valtext.set_color("white")
             self.fl_z_offset_slider.on_changed(self._on_fl_z_offset_change)
+            self._sliders.append(self.fl_z_offset_slider)
 
         # Timepoint slider (right side, only if multiple timepoints)
         if len(self.loader.timepoints) > 1:
@@ -399,6 +406,7 @@ class TCFViewer:
             self.tp_slider.label.set_color("white")
             self.tp_slider.valtext.set_color("white")
             self.tp_slider.on_changed(self._on_timepoint_change)
+            self._sliders.append(self.tp_slider)
 
     def _setup_buttons(self) -> None:
         """Create control buttons with clear, professional labels."""
@@ -961,22 +969,28 @@ class TCFViewer:
         self.pixel_text.set_text(f"Saved: {filename}")
         self.fig.canvas.draw_idle()
 
+    def _adjust_slider(self, delta: float) -> None:
+        """Adjust active slider by delta (as fraction of range)."""
+        slider = self._active_slider
+        range_size = slider.valmax - slider.valmin
+        step = range_size * delta
+        new_val = np.clip(slider.val + step, slider.valmin, slider.valmax)
+        slider.set_val(new_val)
+
     def _on_key(self, event: Event) -> None:
         key = getattr(event, 'key', None)
         if key is None:
             return
-        z_max = self.loader.data_3d.shape[0] - 1
 
-        if key in ("up", "w"):
-            new_z = min(self.s.current_z + 1, z_max)
-            self.z_slider.set_val(new_z * self.res_z)
-        elif key in ("down", "s"):
-            new_z = max(self.s.current_z - 1, 0)
-            self.z_slider.set_val(new_z * self.res_z)
+        # Arrow keys control active slider
+        if key in ("up", "right"):
+            self._adjust_slider(0.02)  # 2% step
+        elif key in ("down", "left"):
+            self._adjust_slider(-0.02)
         elif key == "home":
-            self.z_slider.set_val(0)
+            self._active_slider.set_val(self._active_slider.valmin)
         elif key == "end":
-            self.z_slider.set_val(z_max * self.res_z)
+            self._active_slider.set_val(self._active_slider.valmax)
         elif key == "a":
             self._on_auto_contrast()
         elif key == "g":
@@ -1027,6 +1041,14 @@ class TCFViewer:
         xdata = getattr(event, 'xdata', None)
         ydata = getattr(event, 'ydata', None)
         inaxes = getattr(event, 'inaxes', None)
+        
+        # Check if click is on any slider axis (for arrow key focus)
+        if inaxes is not None:
+            for slider in self._sliders:
+                if inaxes == slider.ax:
+                    self._active_slider = slider
+                    return  # Don't process as slice navigation
+        
         if xdata is None or ydata is None:
             return
 

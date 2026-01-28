@@ -354,8 +354,8 @@ def _create_layer_controls(viewer):
             self.original_blending = layer.blending
             
             layout = QVBoxLayout(self)
-            layout.setContentsMargins(4, 4, 4, 8)
-            layout.setSpacing(6)
+            layout.setContentsMargins(2, 2, 2, 4)
+            layout.setSpacing(3)
             
             # Layer name and visibility
             header = QHBoxLayout()
@@ -488,19 +488,14 @@ def _create_layer_controls(viewer):
             self.layer_controls = []
             
             main_layout = QVBoxLayout(self)
-            main_layout.setSpacing(8)
-            main_layout.setContentsMargins(8, 8, 8, 8)
+            main_layout.setSpacing(4)
+            main_layout.setContentsMargins(4, 4, 4, 4)
             
             # Title
             title = QLabel("<b>Layers</b>")
-            title.setStyleSheet("font-size: 13px;")
+            title.setStyleSheet("font-size: 12px;")
             main_layout.addWidget(title)
-            
-            desc = QLabel("Visibility, color, opacity, threshold, and blending.")
-            desc.setStyleSheet("color: #888; font-size: 10px;")
-            desc.setWordWrap(True)
-            main_layout.addWidget(desc)
-            
+
             # Global buttons
             btn_row = QHBoxLayout()
             
@@ -525,7 +520,7 @@ def _create_layer_controls(viewer):
             
             scroll_content = QWidget()
             self.layers_layout = QVBoxLayout(scroll_content)
-            self.layers_layout.setSpacing(8)
+            self.layers_layout.setSpacing(4)
             self.layers_layout.setContentsMargins(0, 0, 0, 0)
             
             # Add controls for each image layer
@@ -553,8 +548,8 @@ def _create_layer_controls(viewer):
                 ctrl.reset()
     
     widget = LayerControlsWidget()
-    viewer.window.add_dock_widget(widget, name="Layers", area="right")
-    return widget
+    dock = viewer.window.add_dock_widget(widget, name="Layers", area="right")
+    return dock
 
 
 def _create_histogram_widget(viewer):
@@ -577,8 +572,8 @@ def _create_histogram_widget(viewer):
             self.current_layer = None
             
             layout = QVBoxLayout(self)
-            layout.setSpacing(8)
-            layout.setContentsMargins(8, 8, 8, 8)
+            layout.setSpacing(4)
+            layout.setContentsMargins(4, 4, 4, 4)
             
             # Title
             title = QLabel("<b>Histogram</b>")
@@ -783,8 +778,8 @@ def _create_histogram_widget(viewer):
             self._update_histogram()
     
     widget = HistogramWidget()
-    viewer.window.add_dock_widget(widget, name="Histogram", area="right")
-    return widget
+    dock = viewer.window.add_dock_widget(widget, name="Histogram", area="right")
+    return dock
 
 
 def _create_camera_controls(viewer):
@@ -813,17 +808,12 @@ def _create_camera_controls(viewer):
             self.default_angles = (0, -30, 45)
 
             layout = QVBoxLayout(self)
-            layout.setSpacing(8)
-            layout.setContentsMargins(8, 8, 8, 8)
+            layout.setSpacing(4)
+            layout.setContentsMargins(4, 4, 4, 4)
 
             title = QLabel("<b>Camera</b>")
-            title.setStyleSheet("font-size: 13px;")
+            title.setStyleSheet("font-size: 12px;")
             layout.addWidget(title)
-
-            desc = QLabel("Keys 1-6 for presets, 0 for isometric, R to reset.")
-            desc.setStyleSheet("color: #888; font-size: 10px;")
-            desc.setWordWrap(True)
-            layout.addWidget(desc)
 
             # View presets in grid
             grid = QGridLayout()
@@ -948,8 +938,8 @@ def _create_camera_controls(viewer):
             viewer.camera.center = (0, 0, 0)
 
     widget = CameraWidget()
-    viewer.window.add_dock_widget(widget, name="Camera", area="left")
-    return widget
+    dock = viewer.window.add_dock_widget(widget, name="Camera", area="left")
+    return dock
 
 
 def _create_crop_widget(viewer, ht_data: np.ndarray, scale: tuple):
@@ -1012,20 +1002,13 @@ def _create_crop_widget(viewer, ht_data: np.ndarray, scale: tuple):
             self.full_data = {}
             
             layout = QVBoxLayout(self)
-            layout.setSpacing(8)
-            layout.setContentsMargins(8, 8, 8, 8)
+            layout.setSpacing(4)
+            layout.setContentsMargins(4, 4, 4, 4)
             
             # Title
             title = QLabel("<b>Volume Crop</b>")
-            title.setStyleSheet("font-size: 13px;")
+            title.setStyleSheet("font-size: 12px;")
             layout.addWidget(title)
-            
-            # Description
-            desc = QLabel("Drag slider handles to crop each axis (HT only).")
-            desc.setStyleSheet("color: #888; font-size: 10px;")
-            layout.addWidget(desc)
-            
-            layout.addSpacing(4)
             
             z, y, x = ht_data.shape
             
@@ -1087,8 +1070,8 @@ def _create_crop_widget(viewer, ht_data: np.ndarray, scale: tuple):
                     layer.translate = (0, 0, 0)
     
     crop_widget = CropWidget()
-    viewer.window.add_dock_widget(crop_widget, name="Volume Crop", area="left")
-    return crop_widget
+    dock = viewer.window.add_dock_widget(crop_widget, name="Crop", area="left")
+    return dock
 
 
 def _create_clipping_widget(viewer, ht_data: np.ndarray, scale: tuple):
@@ -1120,8 +1103,8 @@ def _create_clipping_widget(viewer, ht_data: np.ndarray, scale: tuple):
             self.clip_ranges = {"x": (0, x - 1), "y": (0, y - 1), "z": (0, z - 1)}
 
             layout = QVBoxLayout(self)
-            layout.setSpacing(8)
-            layout.setContentsMargins(8, 8, 8, 8)
+            layout.setSpacing(4)
+            layout.setContentsMargins(4, 4, 4, 4)
 
             # Title
             title = QLabel("<b>Clipping Planes</b>")
@@ -1321,20 +1304,13 @@ def _create_fl_z_offset_widget(viewer, loader, ht_data: np.ndarray, scale: tuple
                 return
 
             layout = QVBoxLayout(self)
-            layout.setSpacing(8)
-            layout.setContentsMargins(8, 8, 8, 8)
+            layout.setSpacing(4)
+            layout.setContentsMargins(4, 4, 4, 4)
 
             # Title
-            title = QLabel("<b>FL Z Alignment</b>")
-            title.setStyleSheet("font-size: 13px;")
+            title = QLabel("<b>FL Z Offset</b>")
+            title.setStyleSheet("font-size: 12px;")
             layout.addWidget(title)
-
-            desc = QLabel("Adjust fluorescence Z position (no resampling).")
-            desc.setStyleSheet("color: #888; font-size: 10px;")
-            desc.setWordWrap(True)
-            layout.addWidget(desc)
-
-            layout.addSpacing(4)
 
             # Offset slider
             offset_row = QHBoxLayout()
@@ -1396,8 +1372,8 @@ def _create_fl_z_offset_widget(viewer, loader, ht_data: np.ndarray, scale: tuple
                 layer.translate = layer._initial_translate
 
     widget = FLZOffsetWidget()
-    viewer.window.add_dock_widget(widget, name="FL Z Offset", area="right")
-    return widget
+    dock = viewer.window.add_dock_widget(widget, name="FL Z", area="right")
+    return dock
 
 
 def _create_animation_widget(viewer, output_dir: Path):
@@ -1416,8 +1392,8 @@ def _create_animation_widget(viewer, output_dir: Path):
             self._export_mode: str = ""
 
             layout = QVBoxLayout(self)
-            layout.setSpacing(8)
-            layout.setContentsMargins(8, 8, 8, 8)
+            layout.setSpacing(4)
+            layout.setContentsMargins(4, 4, 4, 4)
 
             # Title
             title = QLabel("<b>Animation Export</b>")
@@ -1601,8 +1577,8 @@ def _create_animation_widget(viewer, output_dir: Path):
             self.sweep_mp4_btn.setEnabled(enabled)
 
     widget = AnimationWidget()
-    viewer.window.add_dock_widget(widget, name="Animation", area="right")
-    return widget
+    dock = viewer.window.add_dock_widget(widget, name="Animation", area="right")
+    return dock
 
 
 def view_3d(
@@ -1753,15 +1729,33 @@ def view_3d(
         viewer.window._qt_viewer.dockLayerList.setVisible(False)
         viewer.window._qt_viewer.dockLayerControls.setVisible(False)
 
-        # Add control widgets (order determines stacking)
-        _create_camera_controls(viewer)  # left
-        crop_widget = _create_crop_widget(viewer, ht_data, scale)  # left
-        _create_layer_controls(viewer)  # right
-        _create_histogram_widget(viewer)  # right - for contrast adjustment
+        # Add control widgets and tabify them for cleaner UI
+        # Left side: Camera and Crop in tabs
+        camera_dock = _create_camera_controls(viewer)  # left
+        crop_dock = _create_crop_widget(viewer, ht_data, scale)  # left
+        
+        # Right side: Layers, Histogram, FL, Animation in tabs
+        layers_dock = _create_layer_controls(viewer)  # right
+        histogram_dock = _create_histogram_widget(viewer)  # right
+        fl_dock = None
         if loader.has_fluorescence:
-            # Pass crop_widget so FL alignment changes update the crop cache
-            _create_fl_z_offset_widget(viewer, loader, ht_data, scale, z_offset_mode, crop_widget)  # right
-        _create_animation_widget(viewer, tcf_path.parent)  # right
+            fl_dock = _create_fl_z_offset_widget(viewer, loader, ht_data, scale, z_offset_mode, crop_dock)  # right
+        animation_dock = _create_animation_widget(viewer, tcf_path.parent)  # right
+        
+        # Tabify widgets: group related controls into tabs
+        # Left side: Camera + Crop
+        main_window = viewer.window._qt_window
+        main_window.tabifyDockWidget(camera_dock, crop_dock)
+        camera_dock.raise_()  # Show Camera tab by default
+        
+        # Right side: Layers + Histogram + FL + Animation
+        main_window.tabifyDockWidget(layers_dock, histogram_dock)
+        if fl_dock is not None:
+            main_window.tabifyDockWidget(histogram_dock, fl_dock)
+            main_window.tabifyDockWidget(fl_dock, animation_dock)
+        else:
+            main_window.tabifyDockWidget(histogram_dock, animation_dock)
+        layers_dock.raise_()  # Show Layers tab by default
 
         # Set view mode
         if show_slices:
