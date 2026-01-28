@@ -524,11 +524,11 @@ def _print_help() -> None:
         # Header row: ▶ + space + title, padded to 28 chars each
         print(f"  {s.BRIGHT_MAGENTA}{i.POINTER_DBL}{s.RESET} {s.BOLD}Visualization{s.RESET}            {s.BRIGHT_BLUE}{i.POINTER_DBL}{s.RESET} {s.BOLD}Information{s.RESET}             {s.BRIGHT_GREEN}{i.POINTER_DBL}{s.RESET} {s.BOLD}Export{s.RESET}")
         # Vertical bar row: │ padded to 28 chars each
-        print(f"  {s.BRIGHT_BLACK}{i.BOX_V}{s.RESET}                            {s.BRIGHT_BLACK}{i.BOX_V}{s.RESET}                            {s.BRIGHT_BLACK}{i.BOX_V}{s.RESET}")
+        print(f"  {s.BRIGHT_BLACK}{i.BOX_V}{s.RESET}                          {s.BRIGHT_BLACK}{i.BOX_V}{s.RESET}                         {s.BRIGHT_BLACK}{i.BOX_V}{s.RESET}")
         # Content rows
-        print(f"  {s.BRIGHT_BLACK}{i.BOX_L}{i.BOX_H}{s.RESET} {s.CYAN}view{s.RESET}   {s.DIM}slice viewer{s.RESET}       {s.BRIGHT_BLACK}{i.BOX_L}{i.BOX_H}{s.RESET} {s.CYAN}info{s.RESET}  {s.DIM}metadata{s.RESET}           {s.BRIGHT_BLACK}{i.BOX_L}{i.BOX_H}{s.RESET} {s.CYAN}tiff{s.RESET}  {s.DIM}TIFF stack{s.RESET}")
-        print(f"  {s.BRIGHT_BLACK}{i.BOX_L}{i.BOX_H}{s.RESET} {s.CYAN}view3d{s.RESET} {s.DIM}volume render{s.RESET}      {s.BRIGHT_BLACK}{i.BOX_BL}{i.BOX_H}{s.RESET} {s.CYAN}help{s.RESET}  {s.DIM}this help{s.RESET}          {s.BRIGHT_BLACK}{i.BOX_L}{i.BOX_H}{s.RESET} {s.CYAN}mat{s.RESET}   {s.DIM}MATLAB .mat{s.RESET}")
-        print(f"  {s.BRIGHT_BLACK}{i.BOX_BL}{i.BOX_H}{s.RESET} {s.CYAN}slice{s.RESET}  {s.DIM}HT/FL compare{s.RESET}                                   {s.BRIGHT_BLACK}{i.BOX_BL}{i.BOX_H}{s.RESET} {s.CYAN}gif{s.RESET}   {s.DIM}animation{s.RESET}")
+        print(f"  {s.BRIGHT_BLACK}{i.BOX_L}{i.BOX_H}{s.RESET} {s.CYAN}view{s.RESET}   {s.DIM}slice viewer{s.RESET}     {s.BRIGHT_BLACK}{i.BOX_L}{i.BOX_H}{s.RESET} {s.CYAN}info{s.RESET}  {s.DIM}metadata{s.RESET}         {s.BRIGHT_BLACK}{i.BOX_L}{i.BOX_H}{s.RESET} {s.CYAN}tiff{s.RESET}  {s.DIM}TIFF stack{s.RESET}")
+        print(f"  {s.BRIGHT_BLACK}{i.BOX_L}{i.BOX_H}{s.RESET} {s.CYAN}view3d{s.RESET} {s.DIM}volume render{s.RESET}    {s.BRIGHT_BLACK}{i.BOX_BL}{i.BOX_H}{s.RESET} {s.CYAN}help{s.RESET}  {s.DIM}this help{s.RESET}        {s.BRIGHT_BLACK}{i.BOX_L}{i.BOX_H}{s.RESET} {s.CYAN}mat{s.RESET}   {s.DIM}MATLAB .mat{s.RESET}")
+        print(f"  {s.BRIGHT_BLACK}{i.BOX_BL}{i.BOX_H}{s.RESET} {s.CYAN}slice{s.RESET}  {s.DIM}HT/FL compare{s.RESET}                              {s.BRIGHT_BLACK}{i.BOX_BL}{i.BOX_H}{s.RESET} {s.CYAN}gif{s.RESET}   {s.DIM}animation{s.RESET}")
     else:
         # Single column for narrow terminals
         print(f"  {s.BRIGHT_MAGENTA}{i.POINTER}{s.RESET} {s.BOLD}Visualization{s.RESET}")
@@ -582,6 +582,20 @@ def _print_help() -> None:
     print(f"    {s.BRIGHT_BLACK}{i.BOX_V}{s.RESET}  {s.CYAN}--fps{s.RESET} {s.DIM}<N>{s.RESET}       Frame rate {s.BRIGHT_BLACK}(default: 10){s.RESET}        {s.BRIGHT_BLACK}{i.BOX_V}{s.RESET}")
     # 50 chars:   --axis <z|y|x>  Slice axis (default: z)         
     print(f"    {s.BRIGHT_BLACK}{i.BOX_V}{s.RESET}  {s.CYAN}--axis{s.RESET} {s.DIM}<z|y|x>{s.RESET}  Slice axis {s.BRIGHT_BLACK}(default: z){s.RESET}         {s.BRIGHT_BLACK}{i.BOX_V}{s.RESET}")
+    # 50 chars:   --z-offset-mode FL Z alignment: auto/start/center
+    print(f"    {s.BRIGHT_BLACK}{i.BOX_V}{s.RESET}  {s.CYAN}--z-offset-mode{s.RESET} FL Z align: auto/start/center   {s.BRIGHT_BLACK}{i.BOX_V}{s.RESET}")
+    print(f"    {s.BRIGHT_BLACK}{i.BOX_BL}{i.BOX_H * 50}{i.BOX_BR}{s.RESET}")
+    print()
+
+    # View options (new section)
+    print(f"  {s.YELLOW}{i.SPARK}{s.RESET} {s.BOLD}view, slice, view3d{s.RESET} {s.BRIGHT_BLACK}─ Viewers{s.RESET}")
+    print(f"    {s.BRIGHT_BLACK}{i.BOX_TL}{i.BOX_H * 50}{i.BOX_TR}{s.RESET}")
+    # 50 chars:   --z-offset-mode FL Z alignment: auto/start/center
+    print(f"    {s.BRIGHT_BLACK}{i.BOX_V}{s.RESET}  {s.CYAN}--z-offset-mode{s.RESET} FL Z align: auto/start/center   {s.BRIGHT_BLACK}{i.BOX_V}{s.RESET}")
+    # 50 chars:   --slices        Start in slice mode (view3d)    
+    print(f"    {s.BRIGHT_BLACK}{i.BOX_V}{s.RESET}  {s.CYAN}--slices{s.RESET}        Start in slice mode {s.BRIGHT_BLACK}(view3d){s.RESET}    {s.BRIGHT_BLACK}{i.BOX_V}{s.RESET}")
+    # 50 chars:   -V / --verbose  Show debug info                 
+    print(f"    {s.BRIGHT_BLACK}{i.BOX_V}{s.RESET}  {s.CYAN}-V, --verbose{s.RESET}   Show registration debug info    {s.BRIGHT_BLACK}{i.BOX_V}{s.RESET}")
     print(f"    {s.BRIGHT_BLACK}{i.BOX_BL}{i.BOX_H * 50}{i.BOX_BR}{s.RESET}")
     print()
 
@@ -605,6 +619,7 @@ def _print_help() -> None:
 
     examples = [
         ("View a TCF file", "python -m tomocube view sample.TCF"),
+        ("3D view with centered FL", "python -m tomocube view3d sample.TCF --z-offset-mode center"),
         ("Export to 32-bit TIFF", "python -m tomocube tiff sample.TCF --32bit"),
         ("Create HT+FL overlay animation", "python -m tomocube gif sample.TCF --overlay --fps 15"),
     ]
@@ -713,7 +728,15 @@ def _print_info(file_path: str) -> int:
     print(f"  {s.BRIGHT_BLUE}{i.POINTER}{s.RESET} {s.BOLD}File{s.RESET}")
     print(f"  {s.BRIGHT_BLACK}{i.BOX_V}{s.RESET}")
     print(f"  {s.BRIGHT_BLACK}{i.BOX_L}{i.BOX_H}{s.RESET} Name       {s.GREEN}{tcf_path.name}{s.RESET}")
-    print(f"  {s.BRIGHT_BLACK}{i.BOX_BL}{i.BOX_H}{s.RESET} Location   {s.BRIGHT_BLACK}{tcf_path.parent}{s.RESET}")
+    print(f"  {s.BRIGHT_BLACK}{i.BOX_L}{i.BOX_H}{s.RESET} Location   {s.BRIGHT_BLACK}{tcf_path.parent}{s.RESET}")
+    if info.device_model:
+        print(f"  {s.BRIGHT_BLACK}{i.BOX_L}{i.BOX_H}{s.RESET} Instrument {s.CYAN}{info.device_model}{s.RESET}", end="")
+        if info.device_serial:
+            print(f"  {s.BRIGHT_BLACK}({info.device_serial}){s.RESET}", end="")
+        print()
+    if info.software_version:
+        print(f"  {s.BRIGHT_BLACK}{i.BOX_L}{i.BOX_H}{s.RESET} Software   {info.software_version}")
+    print(f"  {s.BRIGHT_BLACK}{i.BOX_BL}{i.BOX_H}{s.RESET}")
     print()
 
     # Holotomography section
@@ -897,7 +920,22 @@ def main() -> int:
         _print_short_usage()
         return 1
 
-    command = sys.argv[1].lower()
+    # Check for global --verbose / -V flag
+    verbose = False
+    args_to_process = sys.argv[1:]
+    if "--verbose" in args_to_process or "-V" in args_to_process:
+        verbose = True
+        args_to_process = [a for a in args_to_process if a not in ("--verbose", "-V")]
+    
+    if verbose:
+        from tomocube.core import set_verbose
+        set_verbose(True)
+
+    if not args_to_process:
+        _print_short_usage()
+        return 1
+
+    command = args_to_process[0].lower()
 
     # Help command
     if command in ("help", "-h", "--help", "-?"):
@@ -911,7 +949,7 @@ def main() -> int:
         return 0
 
     # Get remaining args as list to preserve paths with spaces
-    args_list = sys.argv[2:] if len(sys.argv) > 2 else []
+    args_list = args_to_process[1:] if len(args_to_process) > 1 else []
     # For simple commands that just need a file path (no options)
     file_path = args_list[0] if args_list else ""
 

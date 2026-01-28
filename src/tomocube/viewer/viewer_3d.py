@@ -34,6 +34,8 @@ from typing import TYPE_CHECKING, Callable
 
 import numpy as np
 
+from tomocube.core.config import vprint, is_verbose
+
 if TYPE_CHECKING:
     from tomocube.core.file import TCFFileLoader
 
@@ -1661,10 +1663,10 @@ def view_3d(
             ht_fov_y = ht_y * rp.ht_res_y
             ht_fov_z = ht_z * rp.ht_res_z
 
-            print(f"\n{'='*60}", flush=True)
-            print(f"FL Overlay (native resolution, no resampling)")
-            print(f"{'='*60}")
-            print(f"  HT: {ht_x}×{ht_y}×{ht_z} px @ {rp.ht_res_x:.4f} µm/px = {ht_fov_x:.1f}×{ht_fov_y:.1f}×{ht_fov_z:.1f} µm")
+            vprint(f"\n{'='*60}")
+            vprint(f"FL Overlay (native resolution, no resampling)")
+            vprint(f"{'='*60}")
+            vprint(f"  HT: {ht_x}×{ht_y}×{ht_z} px @ {rp.ht_res_x:.4f} µm/px = {ht_fov_x:.1f}×{ht_fov_y:.1f}×{ht_fov_z:.1f} µm")
 
             for idx, (ch_name, fl_data) in enumerate(loader.fl_data.items()):
                 fl_z, fl_y, fl_x = fl_data.shape
@@ -1672,7 +1674,7 @@ def view_3d(
                 fl_fov_y = fl_y * rp.fl_res_y
                 fl_fov_z = fl_z * rp.fl_res_z
 
-                print(f"  {ch_name}: {fl_x}×{fl_y}×{fl_z} px @ {rp.fl_res_x:.4f} µm/px = {fl_fov_x:.1f}×{fl_fov_y:.1f}×{fl_fov_z:.1f} µm")
+                vprint(f"  {ch_name}: {fl_x}×{fl_y}×{fl_z} px @ {rp.fl_res_x:.4f} µm/px = {fl_fov_x:.1f}×{fl_fov_y:.1f}×{fl_fov_z:.1f} µm")
 
                 # Get Z offset from file (physical µm offset)
                 ch_offset_z = rp.get_offset_z(ch_name)
@@ -1681,15 +1683,15 @@ def view_3d(
                 if z_offset_mode == "auto":
                     # Center FL on HT volume
                     z_translate = (ht_fov_z - fl_fov_z) / 2
-                    print(f"    Z: centered at {z_translate:.1f} µm (auto)")
+                    vprint(f"    Z: centered at {z_translate:.1f} µm (auto)")
                 elif z_offset_mode == "center":
                     # OffsetZ is center of FL in HT space
                     z_translate = ch_offset_z - fl_fov_z / 2
-                    print(f"    Z: center at {ch_offset_z:.1f} µm => translate {z_translate:.1f} µm")
+                    vprint(f"    Z: center at {ch_offset_z:.1f} µm => translate {z_translate:.1f} µm")
                 else:  # "start"
                     # OffsetZ is where FL starts in HT space
                     z_translate = ch_offset_z
-                    print(f"    Z: starts at {ch_offset_z:.1f} µm")
+                    vprint(f"    Z: starts at {ch_offset_z:.1f} µm")
 
                 # XY centering: both FOVs should match, but center anyway
                 # (handles any small FOV differences)

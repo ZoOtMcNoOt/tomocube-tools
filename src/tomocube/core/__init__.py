@@ -58,6 +58,11 @@ from tomocube.core.file import (
     TCFFile,
     TCFFileLoader,
 )
+from tomocube.core.config import (
+    set_verbose,
+    is_verbose,
+    vprint,
+)
 
 __all__ = [
     # Constants - Resolutions
@@ -104,4 +109,8 @@ __all__ = [
     # File
     "TCFFile",
     "TCFFileLoader",
+    # Config
+    "set_verbose",
+    "is_verbose",
+    "vprint",
 ]

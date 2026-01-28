@@ -6,6 +6,7 @@ Complete guide to using tomocube-tools for viewing, analyzing, and exporting Tom
 
 1. [Installation](#installation)
 2. [Command Line Interface](#command-line-interface)
+   - [Global Options](#global-options)
    - [view - 2D Orthogonal Viewer](#view---2d-orthogonal-viewer)
    - [view3d - 3D Volume Viewer](#view3d---3d-volume-viewer)
    - [slice - Side-by-Side Comparison](#slice---side-by-side-comparison)
@@ -15,8 +16,9 @@ Complete guide to using tomocube-tools for viewing, analyzing, and exporting Tom
    - [gif - Animated GIF Export](#gif---animated-gif-export)
 3. [3D Viewer Controls](#3d-viewer-controls)
 4. [FL-HT Registration](#fl-ht-registration)
-5. [Python API](#python-api)
-6. [Troubleshooting](#troubleshooting)
+5. [Instrument Detection](#instrument-detection)
+6. [Python API](#python-api)
+7. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -55,8 +57,40 @@ pip install napari[all] superqt
 
 All commands use the format:
 ```bash
-python -m tomocube <command> <file.TCF> [options]
+python -m tomocube [global-options] <command> <file.TCF> [options]
 ```
+
+### Global Options
+
+These options can be placed anywhere in the command line:
+
+| Option | Description |
+|--------|-------------|
+| `-V, --verbose` | Enable verbose output showing registration parameters, Z offset calculations, and resolution details |
+| `-h, --help` | Show help message |
+| `--version` | Show version number |
+
+**Verbose Mode Example:**
+
+```bash
+python -m tomocube -V view3d cell.TCF
+```
+
+Output includes:
+```
+[registration] FL → HT registration
+  FL shape:       (18, 1893, 1893)
+  HT shape:       (74, 1172, 1172)
+  FL resolution:  0.1215 × 0.1215 × 1.0440 µm/px
+  HT resolution:  0.1963 × 0.1963 × 0.8390 µm/px
+  Rotation:       0.000°
+  Translation:    (0.00, 0.00) µm
+  Z offset mode:  auto
+  FL covers HT Z range: 21.7 - 40.5 µm
+  HT Z range: 0.00 - 62.1 µm
+```
+
+---
 
 ### view - 2D Orthogonal Viewer
 
@@ -367,6 +401,63 @@ This works better than geometric centering because it finds where the actual flu
 
 ---
 
+## Instrument Detection
+
+The tool automatically detects the instrument model from TCF file metadata and uses appropriate default resolutions.
+
+### Viewing Instrument Info
+
+```bash
+python -m tomocube info sample.TCF
+```
+
+Output includes:
+```
+  ▸ File
+  │
+  ├─ Name       sample.TCF
+  ├─ Location   /path/to/file
+  ├─ Instrument HTX  (XP58002)
+  ├─ Software   HTX ProcessingServer 2.1.27
+  ╰─
+```
+
+### Supported Instruments
+
+| Model | HT XY Res | HT Z Res | FL XY Res | FL Z Res |
+|-------|-----------|----------|-----------|----------|
+| HTX | 0.196 µm | 0.839 µm | 0.122 µm | 1.044 µm |
+| HT-2H-60x | 0.196 µm | 0.839 µm | 0.122 µm | 1.044 µm |
+
+### When Defaults Are Used
+
+Resolution values are read from TCF file attributes when available. Defaults are used when:
+
+1. Resolution attributes are missing from the file
+2. File was created with older software versions
+3. Manual inspection shows incorrect embedded values
+
+Use `--verbose` mode to see which values are being used:
+
+```bash
+python -m tomocube -V view3d sample.TCF
+```
+
+### Accessing Instrument Info Programmatically
+
+```python
+from tomocube import TCFFile
+import h5py
+
+with h5py.File("sample.TCF", "r") as f:
+    tcf = TCFFile.from_hdf5(f)
+    print(f"Model: {tcf.device_model}")      # "HTX"
+    print(f"Serial: {tcf.device_serial}")    # "XP58002"
+    print(f"Software: {tcf.software_version}")  # "HTX ProcessingServer 2.1.27"
+```
+
+---
+
 ## Python API
 
 ### Quick Start
@@ -439,7 +530,9 @@ with TCFFileLoader("data.TCF") as loader:
 
 ## Troubleshooting
 
-### 3D Viewer Won't Start
+### Installation Issues
+
+#### 3D Viewer Won't Start
 
 **Error:** `ImportError: napari is required for 3D viewing`
 
@@ -450,29 +543,119 @@ pip install 'tomocube-tools[3d]'
 pip install napari[all] superqt
 ```
 
-### FL Data Not Aligned
+#### Qt/PyQt Errors on Linux
+
+**Error:** `qt.qpa.plugin: Could not load the Qt platform plugin "xcb"`
+
+**Solution:**
+```bash
+# Install system Qt dependencies
+sudo apt-get install libxcb-xinerama0 libxkbcommon-x11-0
+
+# Or use offscreen rendering
+export QT_QPA_PLATFORM=offscreen
+```
+
+---
+
+### FL Alignment Issues
+
+#### FL Data Not Aligned
 
 **Symptoms:** Fluorescence appears at top/bottom of volume, not overlapping with cell
+
+**Diagnostic Steps:**
+1. Check what mode is being used:
+   ```bash
+   python -m tomocube -V view3d file.TCF
+   ```
+
+2. Look for output like:
+   ```
+   [registration] FL → HT registration
+     FL covers HT Z range: 5.2 - 24.0 µm
+     HT Z range: 0.00 - 62.1 µm
+   ```
 
 **Solutions:**
 1. Use `--z-offset-mode auto` (default, should work for most files)
 2. Try other modes: `--z-offset-mode center` or `--z-offset-mode start`
 3. Use the FL Z Offset panel in the 3D viewer to manually adjust
+4. Check if FL volume is much smaller than HT (may need manual adjustment)
 
-### Slow Performance with Large Files
+#### FL Appears Stretched or Squashed
+
+**Cause:** Incorrect resolution metadata in file
+
+**Diagnostic:**
+```bash
+python -m tomocube info file.TCF
+```
+
+Check that resolutions match expected values:
+- HT: ~0.196 µm/px (XY), ~0.839 µm/slice (Z)
+- FL: ~0.122 µm/px (XY), ~1.044 µm/slice (Z)
+
+**Solution:** File may need manual correction or was created with different instrument settings.
+
+---
+
+### Performance Issues
+
+#### Slow Performance with Large Files
 
 **Solutions:**
 1. Use the Volume Crop sliders to reduce the displayed region
-2. Close other applications to free memory
-3. For files >500MB, consider exporting a subset first
+2. Start in slice mode: `python -m tomocube view3d file.TCF --slices`
+3. Close other applications to free memory
+4. For files >500MB, consider exporting a subset first
 
-### Animation Export Fails
+#### Viewer Crashes on Load
+
+**Possible Causes:**
+- Insufficient memory for volume
+- GPU driver issues with napari
+
+**Solutions:**
+1. Check available memory: file requires ~4× the file size in RAM
+2. Update GPU drivers
+3. Try with software rendering:
+   ```bash
+   export NAPARI_OCTREE=0
+   python -m tomocube view3d file.TCF
+   ```
+
+---
+
+### Export Issues
+
+#### Animation Export Fails
 
 **Error:** `ValueError: could not broadcast input array`
 
 **Solution:** This usually means the clipping/crop settings are invalid. Click "Reset" in the Volume Crop panel before exporting.
 
-### File Won't Open
+#### TIFF Export Creates Corrupted File
+
+**Possible Cause:** Disk full or file locked
+
+**Solutions:**
+1. Check available disk space
+2. Close other programs that might have the file open
+3. Try exporting to a different location
+
+#### GIF Too Large
+
+**Solutions:**
+1. Reduce frame rate: `--fps 5`
+2. Use subset of slices (crop Z range in viewer, then export)
+3. Export as MP4 instead (better compression)
+
+---
+
+### File Issues
+
+#### File Won't Open
 
 **Error:** `TCFParseError: Invalid TCF structure`
 
@@ -481,4 +664,64 @@ pip install napari[all] superqt
 - File is not a valid Tomocube TCF file
 - File was partially written (acquisition interrupted)
 
-**Solution:** Try opening in HDF5 viewer (HDFView, h5dump) to verify structure.
+**Diagnostic:**
+```bash
+# Check if it's a valid HDF5 file
+python -c "import h5py; h5py.File('file.TCF', 'r').visit(print)"
+```
+
+**If HDF5 structure is valid but tool fails:**
+- Check for required groups: `Data/3D/000000`
+- Verify file wasn't truncated during transfer
+
+#### No FL Data Shown (but file has FL)
+
+**Diagnostic:**
+```bash
+python -m tomocube info file.TCF
+```
+
+**Check for:**
+1. FL listed under "Fluorescence" section
+2. Channel names match what you're looking for (CH0, CH1, etc.)
+3. FL volume has non-zero dimensions
+
+**If FL exists but isn't visible:**
+1. Check layer visibility in viewer (eye icon)
+2. Adjust contrast limits (FL may be very dim)
+3. Check opacity slider
+
+---
+
+### Common Error Messages
+
+| Error | Cause | Solution |
+|-------|-------|----------|
+| `FileNotFoundError` | Path incorrect or file missing | Check file path with quotes for spaces |
+| `TCFNoFluorescenceError` | Tried to export FL from HT-only file | Use `--no-fl` flag or different file |
+| `MemoryError` | File too large for available RAM | Use cropping or export subset |
+| `napari error: OpenGL` | GPU/driver issue | Update drivers or use software rendering |
+
+---
+
+### Getting Help
+
+If issues persist:
+
+1. Run with verbose mode for diagnostic info:
+   ```bash
+   python -m tomocube -V <command> <file>
+   ```
+
+2. Check file structure:
+   ```bash
+   python -m tomocube info file.TCF
+   ```
+
+3. Test with minimal example:
+   ```python
+   from tomocube import TCFFileLoader
+   with TCFFileLoader("file.TCF") as loader:
+       loader.load_timepoint(0)
+       print(f"Shape: {loader.data_3d.shape}")
+   ```

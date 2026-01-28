@@ -12,6 +12,7 @@ import logging
 import numpy as np
 
 from tomocube.core.types import RegistrationParams
+from tomocube.core.config import vprint
 
 logger = logging.getLogger(__name__)
 
@@ -175,6 +176,18 @@ def register_fl_to_ht(
     # Get channel-specific Z offset from file
     file_offset_z = params.get_offset_z(channel)
 
+    # Verbose output
+    vprint(f"[registration] FL → HT registration")
+    vprint(f"  FL shape:       {fl_data.shape}")
+    vprint(f"  HT shape:       {ht_shape}")
+    vprint(f"  FL resolution:  {params.fl_res_x:.4f} × {params.fl_res_y:.4f} × {params.fl_res_z:.4f} µm/px")
+    vprint(f"  HT resolution:  {params.ht_res_x:.4f} × {params.ht_res_y:.4f} × {params.ht_res_z:.4f} µm/px")
+    vprint(f"  Rotation:       {np.degrees(params.rotation):.3f}°")
+    vprint(f"  Translation:    ({params.translation_x:.2f}, {params.translation_y:.2f}) µm")
+    vprint(f"  Scale factor:   {params.scale:.4f}")
+    vprint(f"  Z offset mode:  {z_offset_mode}")
+    vprint(f"  File offset Z:  {file_offset_z:.2f} µm" + (f" (channel {channel})" if channel else ""))
+
     if fl_data.ndim == 2:
         # 2D: apply full affine transform
         ht_h, ht_w = ht_shape[-2], ht_shape[-1]
@@ -212,14 +225,27 @@ def register_fl_to_ht(
             effective_offset_z = ht_center_z_um - fl_signal_center_um
             logger.info(f"Z offset mode 'auto': aligning FL signal center ({fl_signal_center_um:.2f} µm) "
                        f"to HT center ({ht_center_z_um:.2f} µm), offset={effective_offset_z:.2f} µm")
+            vprint(f"  AUTO mode: FL signal center at Z={fl_signal_center_um:.2f} µm")
+            vprint(f"  AUTO mode: HT volume center at Z={ht_center_z_um:.2f} µm")
+            vprint(f"  AUTO mode: Effective offset = {effective_offset_z:.2f} µm")
         elif z_offset_mode == "center":
             # OffsetZ is the HT Z position of FL center
             effective_offset_z = file_offset_z - fl_center_z_um
             logger.info(f"Z offset mode 'center': file_offset={file_offset_z:.2f}, effective={effective_offset_z:.2f} µm")
+            vprint(f"  CENTER mode: FL center at Z={fl_center_z_um:.2f} µm")
+            vprint(f"  CENTER mode: File offset = {file_offset_z:.2f} µm")
+            vprint(f"  CENTER mode: Effective offset = {effective_offset_z:.2f} µm")
         else:  # "start" (default)
             # OffsetZ is the HT Z position where FL slice 0 starts
             effective_offset_z = file_offset_z
             logger.debug(f"Z offset mode 'start': offset={effective_offset_z:.2f} µm")
+            vprint(f"  START mode: Effective offset = {effective_offset_z:.2f} µm")
+
+        # Log Z coverage info
+        fl_start_z_um = effective_offset_z
+        fl_end_z_um = effective_offset_z + fl_total_z_um
+        vprint(f"  FL covers HT Z range: {fl_start_z_um:.2f} - {fl_end_z_um:.2f} µm")
+        vprint(f"  HT Z range: 0.00 - {ht_total_z_um:.2f} µm")
 
         output = np.zeros((ht_z, ht_h, ht_w), dtype=np.float32)
 

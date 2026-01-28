@@ -17,6 +17,8 @@ import h5py
 import numpy as np
 
 from tomocube.core.constants import (
+    ATTR_DEVICE_MODEL_TYPE,
+    ATTR_DEVICE_SERIAL,
     ATTR_MAGNIFICATION,
     ATTR_NA,
     ATTR_OFFSET_Z,
@@ -30,6 +32,7 @@ from tomocube.core.constants import (
     ATTR_RI,
     ATTR_RI_MAX,
     ATTR_RI_MIN,
+    ATTR_SOFTWARE_VERSION,
     DEFAULT_FL_RES_X,
     DEFAULT_FL_RES_Y,
     DEFAULT_FL_RES_Z,
@@ -40,6 +43,7 @@ from tomocube.core.constants import (
     PATH_DATA_3D_FL,
     PATH_FL_REGISTRATION,
     PATH_INFO_DEVICE,
+    get_instrument_defaults,
 )
 from tomocube.core.types import RegistrationParams
 
@@ -95,11 +99,38 @@ class TCFFile:
     magnification: float | None = None
     numerical_aperture: float | None = None
     medium_ri: float | None = None
+    device_model: str | None = None
+    device_serial: str | None = None
+    software_version: str | None = None
 
     @classmethod
     def from_hdf5(cls, f: h5py.File) -> TCFFile:
         """Create TCFFile from an open HDF5 file handle."""
         tcf = cls()
+
+        # Read root attributes for device info first (needed for defaults)
+        if ATTR_DEVICE_MODEL_TYPE in f.attrs:
+            raw = np.asarray(f.attrs[ATTR_DEVICE_MODEL_TYPE])[0]
+            tcf.device_model = raw.decode() if isinstance(raw, bytes) else str(raw)
+        if ATTR_DEVICE_SERIAL in f.attrs:
+            raw = np.asarray(f.attrs[ATTR_DEVICE_SERIAL])[0]
+            tcf.device_serial = raw.decode() if isinstance(raw, bytes) else str(raw)
+        if ATTR_SOFTWARE_VERSION in f.attrs:
+            raw = np.asarray(f.attrs[ATTR_SOFTWARE_VERSION])[0]
+            tcf.software_version = raw.decode() if isinstance(raw, bytes) else str(raw)
+
+        # Device info from Info/Device
+        if PATH_INFO_DEVICE in f:
+            dev = _as_group(f[PATH_INFO_DEVICE])
+            if ATTR_MAGNIFICATION in dev.attrs:
+                tcf.magnification = float(np.asarray(dev.attrs[ATTR_MAGNIFICATION])[0])
+            if ATTR_NA in dev.attrs:
+                tcf.numerical_aperture = float(np.asarray(dev.attrs[ATTR_NA])[0])
+            if ATTR_RI in dev.attrs:
+                tcf.medium_ri = float(np.asarray(dev.attrs[ATTR_RI])[0])
+
+        # Get instrument-specific defaults
+        inst_defaults = get_instrument_defaults(tcf.device_model, tcf.magnification)
 
         # Get timepoints
         if PATH_DATA_3D in f:
@@ -113,12 +144,12 @@ class TCFFile:
                 ds = _as_dataset(f[f"{PATH_DATA_3D}/{first_tp}"])
                 tcf.ht_shape = ds.shape
 
-            # Resolution from attributes
+            # Resolution from attributes (use instrument defaults if missing)
             data_3d = _as_group(f[PATH_DATA_3D])
             tcf.ht_resolution = (
-                float(np.asarray(data_3d.attrs.get(ATTR_RESOLUTION_Z, [DEFAULT_HT_RES_Z]))[0]),
-                float(np.asarray(data_3d.attrs.get(ATTR_RESOLUTION_Y, [DEFAULT_HT_RES_Y]))[0]),
-                float(np.asarray(data_3d.attrs.get(ATTR_RESOLUTION_X, [DEFAULT_HT_RES_X]))[0]),
+                float(np.asarray(data_3d.attrs.get(ATTR_RESOLUTION_Z, [inst_defaults["ht_res_z"]]))[0]),
+                float(np.asarray(data_3d.attrs.get(ATTR_RESOLUTION_Y, [inst_defaults["ht_res_xy"]]))[0]),
+                float(np.asarray(data_3d.attrs.get(ATTR_RESOLUTION_X, [inst_defaults["ht_res_xy"]]))[0]),
             )
 
             # RI range - convert from raw units (e.g., 13300) to physical (1.3300)
@@ -136,11 +167,11 @@ class TCFFile:
             fl_group = _as_group(f[PATH_DATA_3D_FL])
             tcf.fl_channels = sorted(fl_group.keys())
 
-            # FL resolution
+            # FL resolution (use instrument defaults if missing)
             tcf.fl_resolution = (
-                float(np.asarray(fl_group.attrs.get(ATTR_RESOLUTION_Z, [DEFAULT_FL_RES_Z]))[0]),
-                float(np.asarray(fl_group.attrs.get(ATTR_RESOLUTION_Y, [DEFAULT_FL_RES_Y]))[0]),
-                float(np.asarray(fl_group.attrs.get(ATTR_RESOLUTION_X, [DEFAULT_FL_RES_X]))[0]),
+                float(np.asarray(fl_group.attrs.get(ATTR_RESOLUTION_Z, [inst_defaults["fl_res_z"]]))[0]),
+                float(np.asarray(fl_group.attrs.get(ATTR_RESOLUTION_Y, [inst_defaults["fl_res_xy"]]))[0]),
+                float(np.asarray(fl_group.attrs.get(ATTR_RESOLUTION_X, [inst_defaults["fl_res_xy"]]))[0]),
             )
 
             # FL shapes per channel
@@ -151,28 +182,19 @@ class TCFFile:
                     ch_ds = _as_dataset(ch_group[ch_timepoints[0]])
                     tcf.fl_shapes[ch] = ch_ds.shape
 
-            # Registration params
-            tcf.registration = load_registration_params(f)
-
-        # Device info
-        if PATH_INFO_DEVICE in f:
-            dev = _as_group(f[PATH_INFO_DEVICE])
-            if ATTR_MAGNIFICATION in dev.attrs:
-                tcf.magnification = float(np.asarray(dev.attrs[ATTR_MAGNIFICATION])[0])
-            if ATTR_NA in dev.attrs:
-                tcf.numerical_aperture = float(np.asarray(dev.attrs[ATTR_NA])[0])
-            if ATTR_RI in dev.attrs:
-                tcf.medium_ri = float(np.asarray(dev.attrs[ATTR_RI])[0])
+            # Registration params (pass instrument defaults)
+            tcf.registration = load_registration_params(f, inst_defaults)
 
         return tcf
 
 
-def load_registration_params(f: h5py.File) -> RegistrationParams:
+def load_registration_params(f: h5py.File, inst_defaults: dict[str, float] | None = None) -> RegistrationParams:
     """
     Load FL-HT registration parameters from TCF file.
 
     Args:
         f: Open HDF5 file handle
+        inst_defaults: Instrument-specific defaults (from get_instrument_defaults)
 
     Returns:
         RegistrationParams with values from file (defaults used for missing attrs)
@@ -181,6 +203,15 @@ def load_registration_params(f: h5py.File) -> RegistrationParams:
         This function is lenient - missing paths or attributes are logged
         and defaults are used. This allows processing of partially complete files.
     """
+    # Use provided instrument defaults or fall back to global defaults
+    if inst_defaults is None:
+        inst_defaults = {
+            "ht_res_xy": DEFAULT_HT_RES_X,
+            "ht_res_z": DEFAULT_HT_RES_Z,
+            "fl_res_xy": DEFAULT_FL_RES_X,
+            "fl_res_z": DEFAULT_FL_RES_Z,
+        }
+    
     params = RegistrationParams()
 
     # XY registration params
@@ -197,52 +228,56 @@ def load_registration_params(f: h5py.File) -> RegistrationParams:
     else:
         logger.debug("FL registration path not found, using default parameters")
 
-    # HT resolution
+    # HT resolution (use instrument defaults if missing)
     ht_using_defaults = False
     if PATH_DATA_3D in f:
         ht = _as_group(f[PATH_DATA_3D])
         if ATTR_RESOLUTION_X in ht.attrs:
             params.ht_res_x = float(np.asarray(ht.attrs[ATTR_RESOLUTION_X])[0])
         else:
+            params.ht_res_x = inst_defaults["ht_res_xy"]
             ht_using_defaults = True
         if ATTR_RESOLUTION_Y in ht.attrs:
             params.ht_res_y = float(np.asarray(ht.attrs[ATTR_RESOLUTION_Y])[0])
         else:
+            params.ht_res_y = inst_defaults["ht_res_xy"]
             ht_using_defaults = True
         if ATTR_RESOLUTION_Z in ht.attrs:
             params.ht_res_z = float(np.asarray(ht.attrs[ATTR_RESOLUTION_Z])[0])
         else:
+            params.ht_res_z = inst_defaults["ht_res_z"]
             ht_using_defaults = True
         if ht_using_defaults:
             logger.warning(
-                f"Missing HT resolution attributes, using defaults "
-                f"(X={DEFAULT_HT_RES_X}, Y={DEFAULT_HT_RES_Y}, Z={DEFAULT_HT_RES_Z} µm/px). "
-                "These defaults are for HT-2H 60x objective."
+                f"Missing HT resolution attributes, using instrument defaults "
+                f"(XY={inst_defaults['ht_res_xy']}, Z={inst_defaults['ht_res_z']} µm/px)."
             )
     else:
         logger.debug("HT data path not found, using default resolution")
 
-    # FL resolution
+    # FL resolution (use instrument defaults if missing)
     fl_using_defaults = False
     if PATH_DATA_3D_FL in f:
         fl = _as_group(f[PATH_DATA_3D_FL])
         if ATTR_RESOLUTION_X in fl.attrs:
             params.fl_res_x = float(np.asarray(fl.attrs[ATTR_RESOLUTION_X])[0])
         else:
+            params.fl_res_x = inst_defaults["fl_res_xy"]
             fl_using_defaults = True
         if ATTR_RESOLUTION_Y in fl.attrs:
             params.fl_res_y = float(np.asarray(fl.attrs[ATTR_RESOLUTION_Y])[0])
         else:
+            params.fl_res_y = inst_defaults["fl_res_xy"]
             fl_using_defaults = True
         if ATTR_RESOLUTION_Z in fl.attrs:
             params.fl_res_z = float(np.asarray(fl.attrs[ATTR_RESOLUTION_Z])[0])
         else:
+            params.fl_res_z = inst_defaults["fl_res_z"]
             fl_using_defaults = True
         if fl_using_defaults:
             logger.warning(
-                f"Missing FL resolution attributes, using defaults "
-                f"(X={DEFAULT_FL_RES_X}, Y={DEFAULT_FL_RES_Y}, Z={DEFAULT_FL_RES_Z} µm/px). "
-                "These defaults are for HT-2H 60x objective."
+                f"Missing FL resolution attributes, using instrument defaults "
+                f"(XY={inst_defaults['fl_res_xy']}, Z={inst_defaults['fl_res_z']} µm/px)."
             )
     else:
         logger.debug("FL data path not found, using default resolution")
