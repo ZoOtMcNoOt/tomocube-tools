@@ -1001,7 +1001,8 @@ def _create_crop_widget(viewer, ht_data: np.ndarray, scale: tuple):
     class CropWidget(QWidget):
         def __init__(self):
             super().__init__()
-            self.full_data = {}
+            self.full_data = {}  # {layer_name: data}
+            self.layer_info = {}  # {layer_name: {'scale': tuple, 'translate': tuple, 'is_fl': bool}}
             
             layout = QVBoxLayout(self)
             layout.setSpacing(4)
@@ -1014,12 +1015,17 @@ def _create_crop_widget(viewer, ht_data: np.ndarray, scale: tuple):
             
             z, y, x = ht_data.shape
             
-            # Only store HT layer (RI) - FL layers have different dimensions
+            # Store all layers with their original data, scale, and translate
             for layer in viewer.layers:
-                if layer.name == "RI" and hasattr(layer, 'data') and isinstance(layer.data, np.ndarray):
+                if hasattr(layer, 'data') and isinstance(layer.data, np.ndarray) and layer.data.ndim == 3:
                     self.full_data[layer.name] = layer.data.copy()
+                    self.layer_info[layer.name] = {
+                        'scale': tuple(layer.scale),
+                        'translate': tuple(layer.translate),
+                        'is_fl': layer.name != "RI"  # FL channels are anything that's not RI
+                    }
             
-            # Create range sliders
+            # Create range sliders (based on HT/RI dimensions)
             self.z_slider = AxisRangeSlider("Z (depth)", z - 1, scale[0], self._apply_crop)
             self.y_slider = AxisRangeSlider("Y (height)", y - 1, scale[1], self._apply_crop)
             self.x_slider = AxisRangeSlider("X (width)", x - 1, scale[2], self._apply_crop)
@@ -1044,12 +1050,78 @@ def _create_crop_widget(viewer, ht_data: np.ndarray, scale: tuple):
             y_min, y_max = self.y_slider.get_range()
             x_min, x_max = self.x_slider.get_range()
             
+            # Calculate physical crop bounds in µm (from HT coordinates)
+            phys_z_min = z_min * scale[0]
+            phys_z_max = (z_max + 1) * scale[0]
+            phys_y_min = y_min * scale[1]
+            phys_y_max = (y_max + 1) * scale[1]
+            phys_x_min = x_min * scale[2]
+            phys_x_max = (x_max + 1) * scale[2]
+            
             for layer in viewer.layers:
-                if layer.name in self.full_data:
-                    full = self.full_data[layer.name]
+                if layer.name not in self.full_data:
+                    continue
+                    
+                full = self.full_data[layer.name]
+                info = self.layer_info[layer.name]
+                layer_scale = info['scale']
+                orig_translate = info['translate']
+                
+                if not info['is_fl']:
+                    # HT/RI layer - direct pixel crop
                     cropped = full[z_min:z_max+1, y_min:y_max+1, x_min:x_max+1]
                     layer.data = cropped
-                    layer.translate = (z_min * scale[0], y_min * scale[1], x_min * scale[2])
+                    layer.translate = (phys_z_min, phys_y_min, phys_x_min)
+                else:
+                    # FL layer - convert physical bounds to FL pixel coordinates
+                    # Account for original translate offset
+                    fl_z, fl_y, fl_x = full.shape
+                    
+                    # FL physical bounds (with original translate)
+                    fl_phys_z_start = orig_translate[0]
+                    fl_phys_y_start = orig_translate[1]
+                    fl_phys_x_start = orig_translate[2]
+                    fl_phys_z_end = fl_phys_z_start + fl_z * layer_scale[0]
+                    fl_phys_y_end = fl_phys_y_start + fl_y * layer_scale[1]
+                    fl_phys_x_end = fl_phys_x_start + fl_x * layer_scale[2]
+                    
+                    # Find intersection of crop region with FL physical bounds
+                    crop_z_start = max(phys_z_min, fl_phys_z_start)
+                    crop_z_end = min(phys_z_max, fl_phys_z_end)
+                    crop_y_start = max(phys_y_min, fl_phys_y_start)
+                    crop_y_end = min(phys_y_max, fl_phys_y_end)
+                    crop_x_start = max(phys_x_min, fl_phys_x_start)
+                    crop_x_end = min(phys_x_max, fl_phys_x_end)
+                    
+                    # Check if there's any intersection
+                    if crop_z_end <= crop_z_start or crop_y_end <= crop_y_start or crop_x_end <= crop_x_start:
+                        # No intersection - hide layer with empty data
+                        layer.data = np.zeros((1, 1, 1), dtype=full.dtype)
+                        layer.visible = False
+                        continue
+                    
+                    layer.visible = True
+                    
+                    # Convert physical intersection to FL pixel coordinates
+                    fl_pix_z_min = int((crop_z_start - fl_phys_z_start) / layer_scale[0])
+                    fl_pix_z_max = int(np.ceil((crop_z_end - fl_phys_z_start) / layer_scale[0]))
+                    fl_pix_y_min = int((crop_y_start - fl_phys_y_start) / layer_scale[1])
+                    fl_pix_y_max = int(np.ceil((crop_y_end - fl_phys_y_start) / layer_scale[1]))
+                    fl_pix_x_min = int((crop_x_start - fl_phys_x_start) / layer_scale[2])
+                    fl_pix_x_max = int(np.ceil((crop_x_end - fl_phys_x_start) / layer_scale[2]))
+                    
+                    # Clamp to valid range
+                    fl_pix_z_min = max(0, min(fl_pix_z_min, fl_z))
+                    fl_pix_z_max = max(0, min(fl_pix_z_max, fl_z))
+                    fl_pix_y_min = max(0, min(fl_pix_y_min, fl_y))
+                    fl_pix_y_max = max(0, min(fl_pix_y_max, fl_y))
+                    fl_pix_x_min = max(0, min(fl_pix_x_min, fl_x))
+                    fl_pix_x_max = max(0, min(fl_pix_x_max, fl_x))
+                    
+                    cropped = full[fl_pix_z_min:fl_pix_z_max, fl_pix_y_min:fl_pix_y_max, fl_pix_x_min:fl_pix_x_max]
+                    layer.data = cropped
+                    # New translate: where the cropped FL starts in physical space
+                    layer.translate = (crop_z_start, crop_y_start, crop_x_start)
         
         def _reset(self):
             # Block signals to prevent multiple updates
@@ -1065,11 +1137,12 @@ def _create_crop_widget(viewer, ht_data: np.ndarray, scale: tuple):
             self.y_slider.slider.blockSignals(False)
             self.x_slider.slider.blockSignals(False)
             
-            # Restore full data
+            # Restore full data with original scale and translate
             for layer in viewer.layers:
                 if layer.name in self.full_data:
                     layer.data = self.full_data[layer.name].copy()
-                    layer.translate = (0, 0, 0)
+                    layer.translate = self.layer_info[layer.name]['translate']
+                    layer.visible = True
     
     crop_widget = CropWidget()
     dock = viewer.window.add_dock_widget(crop_widget, name="Crop", area="left")
