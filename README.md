@@ -393,8 +393,6 @@ src/tomocube/
 
 - **[INSTRUCTIONS.md](INSTRUCTIONS.md)** - Complete user guide with detailed options
 - **[DATA_ANALYSIS.md](DATA_ANALYSIS.md)** - TCF file format and data structure reference
-- **[TODO.md](TODO.md)** - Development roadmap and technical debt
-
 ---
 
 ## License
