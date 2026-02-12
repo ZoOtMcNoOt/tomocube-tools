@@ -1,727 +1,292 @@
-# Tomocube Tools - User Instructions
+# Tomocube Tools Instructions
 
-Complete guide to using tomocube-tools for viewing, analyzing, and exporting Tomocube TCF files.
-
-## Table of Contents
-
-1. [Installation](#installation)
-2. [Command Line Interface](#command-line-interface)
-   - [Global Options](#global-options)
-   - [view - 2D Orthogonal Viewer](#view---2d-orthogonal-viewer)
-   - [view3d - 3D Volume Viewer](#view3d---3d-volume-viewer)
-   - [slice - Side-by-Side Comparison](#slice---side-by-side-comparison)
-   - [info - File Information](#info---file-information)
-   - [tiff - TIFF Export](#tiff---tiff-export)
-   - [mat - MATLAB Export](#mat---matlab-export)
-   - [gif - Animated GIF Export](#gif---animated-gif-export)
-3. [3D Viewer Controls](#3d-viewer-controls)
-4. [FL-HT Registration](#fl-ht-registration)
-5. [Instrument Detection](#instrument-detection)
-6. [Python API](#python-api)
-7. [Troubleshooting](#troubleshooting)
-
----
+Reference guide for the `tomocube-tools` CLI and Python API.
 
 ## Installation
 
-### Basic Installation
-
 ```bash
-# Clone the repository
-git clone https://github.com/your-username/tomocube-tools.git
-cd tomocube-tools
-
-# Install in development mode
 pip install -e .
 ```
 
-### With 3D Viewer Support
+Optional extras:
 
 ```bash
-# Install with napari for 3D visualization
+# napari 3D viewer + animation dependencies
 pip install -e ".[3d]"
 
-# Or install napari separately
-pip install napari[all] superqt
+# all extras
+pip install -e ".[all]"
 ```
 
-### Dependencies
+## CLI Basics
 
-- **Core:** h5py, numpy, scipy, matplotlib, tifffile, pillow
-- **3D Viewer:** napari, superqt (for range sliders)
-- **Video Export:** imageio-ffmpeg (for MP4 export)
-
----
-
-## Command Line Interface
-
-All commands use the format:
-```bash
-python -m tomocube [global-options] <command> <file.TCF> [options]
-```
-
-### Global Options
-
-These options can be placed anywhere in the command line:
-
-| Option | Description |
-|--------|-------------|
-| `-V, --verbose` | Enable verbose output showing registration parameters, Z offset calculations, and resolution details |
-| `-h, --help` | Show help message |
-| `--version` | Show version number |
-
-**Verbose Mode Example:**
+General form:
 
 ```bash
-python -m tomocube -V view3d cell.TCF
+python -m tomocube [global-options] <command> <file.TCF> [command-options]
 ```
 
-Output includes:
-```
-[registration] FL → HT registration
-  FL shape:       (18, 1893, 1893)
-  HT shape:       (74, 1172, 1172)
-  FL resolution:  0.1215 × 0.1215 × 1.0440 µm/px
-  HT resolution:  0.1963 × 0.1963 × 0.8390 µm/px
-  Rotation:       0.000°
-  Translation:    (0.00, 0.00) µm
-  Z offset mode:  auto
-  FL covers HT Z range: 21.7 - 40.5 µm
-  HT Z range: 0.00 - 62.1 µm
-```
+Global options:
 
----
+- `-V`, `--verbose`: verbose registration/debug output.
 
-### view - 2D Orthogonal Viewer
+Help/version entry points:
 
-Interactive viewer with XY, XZ, YZ slices and measurement tools.
+- `python -m tomocube help`
+- `python -m tomocube --help`
+- `python -m tomocube --version`
 
-```bash
-python -m tomocube view path/to/file.TCF
-```
+## Commands
 
-**Keyboard Shortcuts:**
+### `info`
 
-| Key | Action |
-|-----|--------|
-| Up/Down or Scroll | Navigate Z-slices |
-| Home/End | Jump to first/last slice |
-| A | Auto-contrast (current slice) |
-| G | Auto-contrast (global) |
-| R | Reset view |
-| S | Save current slice as PNG |
-| M | Save MIP as PNG |
-| I | Invert colormap |
-| F | Toggle fluorescence overlay |
-| D | Distance measurement mode |
-| P | Polygon/area measurement mode |
-| C | Clear all measurements |
-| 1-6 | Switch colormap |
-| Q/Escape | Quit |
-
-**Measurement Tools:**
-- **Distance (D):** Click two points to measure distance in micrometers
-- **Area (P):** Click multiple points, double-click to finish. Shows area and perimeter
-
----
-
-### view3d - 3D Volume Viewer
-
-Interactive 3D volume rendering using napari.
-
-```bash
-python -m tomocube view3d path/to/file.TCF [options]
-```
-
-**Options:**
-
-| Option | Description |
-|--------|-------------|
-| `--slices` | Start in 2D slice mode instead of 3D |
-| `--render <mode>` | Rendering mode: `mip`, `attenuated_mip`, `minip`, `average` |
-| `--z-offset-mode <mode>` | FL Z alignment: `auto`, `start`, `center` |
-| `--screenshot <file>` | Save screenshot to file |
-
-**Examples:**
-
-```bash
-# Basic 3D view
-python -m tomocube view3d cell.TCF
-
-# Start in slice mode
-python -m tomocube view3d cell.TCF --slices
-
-# Use attenuated MIP rendering
-python -m tomocube view3d cell.TCF --render attenuated_mip
-
-# Force FL registration to use file's offset
-python -m tomocube view3d cell.TCF --z-offset-mode start
-
-# Save a screenshot
-python -m tomocube view3d cell.TCF --screenshot output.png
-```
-
-**Z Offset Modes Explained:**
-
-| Mode | Behavior |
-|------|----------|
-| `auto` | Smart alignment - finds FL signal center and aligns to HT center (recommended) |
-| `start` | Uses file's OffsetZ as position where FL slice 0 starts |
-| `center` | Uses file's OffsetZ as position of FL volume center |
-
-See [FL-HT Registration](#fl-ht-registration) for details.
-
----
-
-### slice - Side-by-Side Comparison
-
-Compare HT and FL data side-by-side.
-
-```bash
-python -m tomocube slice path/to/file.TCF
-```
-
-Shows three panels: HT (grayscale), FL (green), and RGB overlay.
-
----
-
-### info - File Information
-
-Display TCF file metadata.
+Show TCF metadata.
 
 ```bash
 python -m tomocube info path/to/file.TCF
 ```
 
-**Output includes:**
-- HT shape and resolution
-- Magnification and numerical aperture
-- Medium refractive index
-- Number of timepoints
-- Fluorescence channels and shapes
-- RI value range
+Includes:
 
----
+- HT dimensions/resolution/FOV/RI range
+- fluorescence channels and sizes (if present)
+- optics metadata (magnification, NA, medium RI)
+- detected instrument identifiers (if embedded)
+- related sidecar metadata (`.experiment`, `.vessel`, `profile/*.prf`) when present
 
-### tiff - TIFF Export
+### `view`
 
-Export TCF data to multi-page TIFF stack.
+Orthogonal 2D HT viewer with optional FL overlays and measurement tools.
+
+```bash
+python -m tomocube view path/to/file.TCF [--z-offset-mode start|center|auto]
+```
+
+Default `z-offset-mode` for `view`: `start`.
+
+If no path is provided, the legacy viewer fallback path selection logic is used.
+
+### `slice`
+
+Side-by-side HT / FL / overlay slice viewer.
+
+```bash
+python -m tomocube slice path/to/file.TCF [--z-offset-mode start|center|auto]
+```
+
+Default `z-offset-mode` for `slice`: `start`.
+
+If no path is provided, fallback file discovery logic is used.
+
+### `view3d`
+
+3D napari viewer.
+
+```bash
+python -m tomocube view3d path/to/file.TCF [options]
+```
+
+Options:
+
+- `--slices`: start in 2D slice mode.
+- `--render mip|attenuated_mip|minip|average`: initial rendering mode.
+- `--z-offset-mode auto|start|center`: FL alignment mode.
+- `--screenshot <file>`: save screenshot path.
+
+Default `z-offset-mode` for `view3d`: `auto`.
+
+### `tiff`
+
+Export HT or FL stack to TIFF.
 
 ```bash
 python -m tomocube tiff path/to/file.TCF [output.tiff] [options]
 ```
 
-**Options:**
+Options:
 
-| Option | Description |
-|--------|-------------|
-| `--fl CH0` | Export fluorescence channel instead of HT |
-| `--16bit` | 16-bit output (default) |
-| `--32bit` | 32-bit float output |
+- `--fl <channel>`: export FL channel (example: `CH0`) instead of HT.
+- `--32bit`: 32-bit float output (CLI default).
+- `--16bit`: 16-bit output (requires `--normalize`).
+- `--normalize`: normalize to display range before export.
 
-**Examples:**
+Notes:
 
-```bash
-# Export HT as 16-bit TIFF
-python -m tomocube tiff data.TCF ht_stack.tiff
+- CLI default behavior preserves HT physical RI values (`--32bit` without normalization).
+- If output path is omitted, default is `<stem>_<channel>.tiff`.
 
-# Export FL channel as 32-bit TIFF
-python -m tomocube tiff data.TCF fl_stack.tiff --fl CH0 --32bit
-```
+### `mat`
 
----
-
-### mat - MATLAB Export
-
-Export TCF data to MATLAB .mat format.
+Export to MATLAB `.mat`.
 
 ```bash
-python -m tomocube mat path/to/file.TCF [output.mat] [options]
+python -m tomocube mat path/to/file.TCF [output.mat] [--no-fl]
 ```
 
-**Options:**
+Notes:
 
-| Option | Description |
-|--------|-------------|
-| `--no-fl` | Exclude fluorescence data |
+- If output path is omitted, default is `<stem>.mat`.
+- `--no-fl` excludes fluorescence volumes.
 
-**Output variables:**
-- `ht_data` - 3D HT volume (Z, Y, X)
-- `fl_CH0`, `fl_CH1`, ... - FL channels (if present)
-- `ht_resolution` - [Z, Y, X] resolution in um
-- `fl_resolution` - [Z, Y, X] resolution in um
-- `magnification`, `numerical_aperture`, `medium_ri`
+MAT keys written by current exporter:
 
----
+- `ht_3d`
+- `ht_mip`
+- `fl_ch0`, `fl_ch1`, ... (if included)
+- `metadata` (dict)
+- `resolution` (dict)
 
-### gif - Animated GIF Export
+### `gif`
 
-Create animated GIF from TCF data.
+Export GIF animation.
 
 ```bash
 python -m tomocube gif path/to/file.TCF [output.gif] [options]
 ```
 
-**Options:**
+Options:
 
-| Option | Description |
-|--------|-------------|
-| `--overlay` | Create HT+FL overlay animation |
-| `--fps N` | Frame rate (default: 10) |
-| `--axis z\|y\|x` | Slice axis for animation (default: z) |
+- `--overlay`: export HT+FL overlay animation.
+- `--fps <N>`: frame rate (default `10`).
+- `--axis z|y|x`: animation axis (default `z`).
+- `--z-offset-mode start|center|auto`: used for overlay mode.
 
-**Examples:**
+Notes:
 
-```bash
-# Z-stack animation
-python -m tomocube gif data.TCF z_animation.gif
+- Overlay mode currently uses FL channel `CH0`.
+- Default output naming is `<stem>_<axis>.gif` (non-overlay) or `<stem>_overlay.gif` (overlay).
+- Default `z-offset-mode` for overlay exports: `start`.
 
-# Y-slice animation at 15 fps
-python -m tomocube gif data.TCF y_slices.gif --axis y --fps 15
+## Registration Modes
 
-# HT+FL overlay animation
-python -m tomocube gif data.TCF overlay.gif --overlay --fps 12
-```
+`z-offset-mode` meanings:
 
----
+- `start`: file `OffsetZ` is FL slice-0 start in HT space.
+- `center`: file `OffsetZ` is FL center in HT space.
+- `auto`: alignment heuristic.
 
-## 3D Viewer Controls
+Defaults by path:
 
-The 3D viewer (view3d) has several control panels:
+| Path | Default mode |
+|---|---|
+| `view` | `start` |
+| `slice` | `start` |
+| `gif --overlay` | `start` |
+| `view3d` | `auto` |
+| `register_fl_to_ht(...)` API | `start` |
 
-### Camera Panel (Left)
+## Viewer Controls
 
-**View Presets:**
-- Top [1], Bottom [2], Front [3], Back [4], Left [5], Right [6]
-- Isometric [0], Reset [R], Fit [F]
+### `view` (2D orthogonal viewer)
 
-**Zoom:**
-- Zoom In [+/=], Zoom Out [-]
-- Fit to view [F]
+Keys:
 
-**Mouse Mode:**
-- **Rotate:** Left-drag to rotate view (default)
-- **Pan:** Shift + left-drag to pan view
-- Scroll to zoom
+- Arrow keys: move active slider.
+- `Home` / `End`: min/max active slider.
+- `A`: auto contrast (slice).
+- `G`: global contrast.
+- `R`: reset view.
+- `I`: invert colormap.
+- `F`: toggle FL overlay.
+- `D`: distance measurement.
+- `P`: area/polygon measurement.
+- `C`: clear measurements.
+- `M`: save MIP PNG.
+- `1`-`6`: colormap selection.
+- `Q` / `Escape`: quit or cancel active measurement.
 
-**Keyboard Shortcuts:**
+Mouse:
 
-| Key | Action |
-|-----|--------|
-| 1-6 | Camera presets (Top/Bottom/Front/Back/Left/Right) |
-| 0 | Isometric view |
-| R | Reset camera |
-| F | Fit view to data |
-| +/- | Zoom in/out |
-| 2/3 | Toggle 2D slice / 3D volume mode |
+- Scroll in XY view: move Z.
+- Scroll in XZ view: move Y.
+- Click in views: move crosshair position.
 
-### Volume Crop Panel (Left)
+UI buttons also expose save/reset/contrast actions.
 
-Drag the range sliders to crop the volume on each axis:
-- **Z (depth):** Crop top/bottom slices
-- **Y (height):** Crop front/back
-- **X (width):** Crop left/right
+### `slice`
 
-Shows physical size in micrometers.
+Keys:
 
-### Layers Panel (Right)
+- Arrow keys: move active slider.
+- `Home` / `End`: min/max active slider.
+- `Q` / `Escape`: quit.
 
-Control visibility and appearance of each layer:
-- **RI:** Holotomography (refractive index) volume
-- **CH0, CH1, ...:** Fluorescence channels
+### `view3d` (napari)
 
-For each layer:
-- Eye icon: Toggle visibility
-- Opacity slider: Adjust transparency
-- Contrast sliders: Adjust min/max display values
+Dock panels:
 
-### FL Z Offset Panel (Right)
+- Left: `Camera`, `Crop`
+- Right: `Layers`, `Histogram`, `FL Z` (when FL exists), `Animation`
 
-*Only appears when FL data is present.*
+Camera shortcuts:
 
-Adjust fluorescence Z alignment:
-- **Mode dropdown:** auto, start, center, manual
-- **Offset slider:** Fine-tune Z position (manual mode only)
-- **Reset to Auto:** Return to automatic alignment
+- `1`-`6`: top/bottom/front/back/left/right
+- `0`: isometric
+- `R`: reset
+- `F`: fit
+- `+` / `=` and `-`: zoom
 
-### Animation Panel (Right)
+Animation export is provided from the `Animation` dock (turntable and slice sweep, GIF/MP4).
 
-Export animations:
-
-**Turntable (360°):**
-- Frames: Number of rotation steps
-- Speed: Slow/Normal/Fast
-- Export GIF or MP4
-
-**Slice Sweep:**
-- Axis: Z/Y/X
-- Export GIF or MP4
-
----
-
-## FL-HT Registration
-
-Fluorescence (FL) and holotomography (HT) images are captured at different resolutions and may need Z-axis alignment.
-
-### The Problem
-
-| Property | HT | FL |
-|----------|----|----|
-| XY Resolution | ~0.196 um/px | ~0.122 um/px |
-| Z Resolution | ~0.839 um/slice | ~1.044 um/slice |
-| Image Size | 1172 x 1172 | 1893 x 1893 |
-| Z Slices | ~74-96 | ~28-32 |
-
-Both cover the same physical field of view (~230 um), but the file's `OffsetZ` parameter often doesn't correctly align the volumes.
-
-### How Auto Mode Works
-
-The `auto` mode uses signal-based alignment:
-
-1. **Calculate FL signal center:** Find the intensity-weighted center of mass along the Z-axis
-2. **Align to HT center:** Position the FL signal center at the HT volume center
-
-This works better than geometric centering because it finds where the actual fluorescence signal is, not just the middle of the acquisition volume.
-
-### When to Use Each Mode
-
-| Mode | When to Use |
-|------|-------------|
-| `auto` | Default - works best for most files |
-| `start` | If you know the file's OffsetZ is correct and represents FL start position |
-| `center` | If the file's OffsetZ represents FL center position |
-| `manual` | Fine-tune alignment visually in the viewer |
-
-### Visual Verification
-
-1. Open the 3D viewer: `python -m tomocube view3d file.TCF`
-2. Look at the FL Z Offset panel on the right
-3. Try different modes and see which aligns best with the cell structure visible in HT
-4. Use manual mode with the slider for fine adjustment
-
----
-
-## Instrument Detection
-
-The tool automatically detects the instrument model from TCF file metadata and uses appropriate default resolutions.
-
-### Viewing Instrument Info
-
-```bash
-python -m tomocube info sample.TCF
-```
-
-Output includes:
-```
-  ▸ File
-  │
-  ├─ Name       sample.TCF
-  ├─ Location   /path/to/file
-  ├─ Instrument HTX  (XP58002)
-  ├─ Software   HTX ProcessingServer 2.1.27
-  ╰─
-```
-
-### Supported Instruments
-
-| Model | HT XY Res | HT Z Res | FL XY Res | FL Z Res |
-|-------|-----------|----------|-----------|----------|
-| HTX | 0.196 µm | 0.839 µm | 0.122 µm | 1.044 µm |
-| HT-2H-60x | 0.196 µm | 0.839 µm | 0.122 µm | 1.044 µm |
-
-### When Defaults Are Used
-
-Resolution values are read from TCF file attributes when available. Defaults are used when:
-
-1. Resolution attributes are missing from the file
-2. File was created with older software versions
-3. Manual inspection shows incorrect embedded values
-
-Use `--verbose` mode to see which values are being used:
-
-```bash
-python -m tomocube -V view3d sample.TCF
-```
-
-### Accessing Instrument Info Programmatically
+## Python API Quick Reference
 
 ```python
-from tomocube import TCFFile
 import h5py
-
-with h5py.File("sample.TCF", "r") as f:
-    tcf = TCFFile.from_hdf5(f)
-    print(f"Model: {tcf.device_model}")      # "HTX"
-    print(f"Serial: {tcf.device_serial}")    # "XP58002"
-    print(f"Software: {tcf.software_version}")  # "HTX ProcessingServer 2.1.27"
-```
-
----
-
-## Python API
-
-### Quick Start
-
-```python
-from tomocube import TCFFileLoader
-
-with TCFFileLoader("data.TCF") as loader:
-    loader.load_timepoint(0)
-
-    # Access data
-    ht_data = loader.data_3d      # 3D numpy array (Z, Y, X)
-    mip = loader.data_mip         # 2D maximum intensity projection
-    fl_data = loader.fl_data      # {"CH0": array, ...}
-
-    # Get metadata
-    print(f"Shape: {ht_data.shape}")
-    print(f"Has FL: {loader.has_fluorescence}")
-    print(f"Magnification: {loader.magnification}x")
-```
-
-### FL-HT Registration
-
-```python
-from tomocube import register_fl_to_ht, TCFFileLoader
-
-with TCFFileLoader("data.TCF") as loader:
-    loader.load_timepoint(0)
-
-    if loader.has_fluorescence:
-        fl_data = loader.fl_data["CH0"]
-        ht_shape = loader.data_3d.shape
-        params = loader.reg_params
-
-        # Register FL volume to HT coordinates
-        fl_registered = register_fl_to_ht(
-            fl_data,
-            ht_shape,
-            params,
-            channel="CH0",
-            z_offset_mode="auto"  # or "start", "center"
-        )
-
-        # fl_registered now has same shape as ht_data
-```
-
-### Export Functions
-
-```python
 from tomocube import (
+    TCFFile,
+    TCFFileLoader,
+    register_fl_to_ht,
     export_to_tiff,
     export_to_mat,
     export_to_gif,
 )
 
-with TCFFileLoader("data.TCF") as loader:
+with h5py.File("path/to/file.TCF", "r") as f:
+    meta = TCFFile.from_hdf5(f)
+    print(meta.ht_shape, meta.has_fluorescence, meta.fl_channels)
+
+with TCFFileLoader("path/to/file.TCF") as loader:
     loader.load_timepoint(0)
+    ht = loader.data_3d
+    fl = loader.fl_data.get("CH0")
 
-    # TIFF export
-    export_to_tiff(loader, "output.tiff", channel="ht", bit_depth=16)
+    if fl is not None:
+        fl_reg = register_fl_to_ht(fl, ht.shape, loader.reg_params, channel="CH0")
 
-    # MATLAB export
-    export_to_mat(loader, "output.mat", include_fl=True)
-
-    # GIF export
-    export_to_gif(loader, "z_stack.gif", axis="z", fps=10)
+    # API defaults differ from CLI for TIFF:
+    # bit_depth=16, normalize=True
+    export_to_tiff(loader, "out.tiff", bit_depth=32, normalize=False)
+    export_to_mat(loader, "out.mat", include_fl=True)
+    export_to_gif(loader, "out.gif", axis="z", fps=10)
 ```
-
----
 
 ## Troubleshooting
 
-### Installation Issues
+### `view3d` fails with napari import error
 
-#### 3D Viewer Won't Start
+Install 3D extras:
 
-**Error:** `ImportError: napari is required for 3D viewing`
-
-**Solution:**
 ```bash
-pip install 'tomocube-tools[3d]'
-# or
-pip install napari[all] superqt
+pip install -e ".[3d]"
 ```
 
-#### Qt/PyQt Errors on Linux
+### `tiff` with `--16bit` fails
 
-**Error:** `qt.qpa.plugin: Could not load the Qt platform plugin "xcb"`
+`--16bit` requires `--normalize` by design.
 
-**Solution:**
 ```bash
-# Install system Qt dependencies
-sudo apt-get install libxcb-xinerama0 libxkbcommon-x11-0
-
-# Or use offscreen rendering
-export QT_QPA_PLATFORM=offscreen
+python -m tomocube tiff file.TCF out.tiff --16bit --normalize
 ```
 
----
+### Overlay GIF reports missing fluorescence
 
-### FL Alignment Issues
+The file has no FL data or no `CH0` channel.
+Check with:
 
-#### FL Data Not Aligned
-
-**Symptoms:** Fluorescence appears at top/bottom of volume, not overlapping with cell
-
-**Diagnostic Steps:**
-1. Check what mode is being used:
-   ```bash
-   python -m tomocube -V view3d file.TCF
-   ```
-
-2. Look for output like:
-   ```
-   [registration] FL → HT registration
-     FL covers HT Z range: 5.2 - 24.0 µm
-     HT Z range: 0.00 - 62.1 µm
-   ```
-
-**Solutions:**
-1. Use `--z-offset-mode auto` (default, should work for most files)
-2. Try other modes: `--z-offset-mode center` or `--z-offset-mode start`
-3. Use the FL Z Offset panel in the 3D viewer to manually adjust
-4. Check if FL volume is much smaller than HT (may need manual adjustment)
-
-#### FL Appears Stretched or Squashed
-
-**Cause:** Incorrect resolution metadata in file
-
-**Diagnostic:**
 ```bash
 python -m tomocube info file.TCF
 ```
 
-Check that resolutions match expected values:
-- HT: ~0.196 µm/px (XY), ~0.839 µm/slice (Z)
-- FL: ~0.122 µm/px (XY), ~1.044 µm/slice (Z)
+### File cannot be opened
 
-**Solution:** File may need manual correction or was created with different instrument settings.
-
----
-
-### Performance Issues
-
-#### Slow Performance with Large Files
-
-**Solutions:**
-1. Use the Volume Crop sliders to reduce the displayed region
-2. Start in slice mode: `python -m tomocube view3d file.TCF --slices`
-3. Close other applications to free memory
-4. For files >500MB, consider exporting a subset first
-
-#### Viewer Crashes on Load
-
-**Possible Causes:**
-- Insufficient memory for volume
-- GPU driver issues with napari
-
-**Solutions:**
-1. Check available memory: file requires ~4× the file size in RAM
-2. Update GPU drivers
-3. Try with software rendering:
-   ```bash
-   export NAPARI_OCTREE=0
-   python -m tomocube view3d file.TCF
-   ```
-
----
-
-### Export Issues
-
-#### Animation Export Fails
-
-**Error:** `ValueError: could not broadcast input array`
-
-**Solution:** This usually means the clipping/crop settings are invalid. Click "Reset" in the Volume Crop panel before exporting.
-
-#### TIFF Export Creates Corrupted File
-
-**Possible Cause:** Disk full or file locked
-
-**Solutions:**
-1. Check available disk space
-2. Close other programs that might have the file open
-3. Try exporting to a different location
-
-#### GIF Too Large
-
-**Solutions:**
-1. Reduce frame rate: `--fps 5`
-2. Use subset of slices (crop Z range in viewer, then export)
-3. Export as MP4 instead (better compression)
-
----
-
-### File Issues
-
-#### File Won't Open
-
-**Error:** `TCFParseError: Invalid TCF structure`
-
-**Possible causes:**
-- File is corrupted
-- File is not a valid Tomocube TCF file
-- File was partially written (acquisition interrupted)
-
-**Diagnostic:**
-```bash
-# Check if it's a valid HDF5 file
-python -c "import h5py; h5py.File('file.TCF', 'r').visit(print)"
-```
-
-**If HDF5 structure is valid but tool fails:**
-- Check for required groups: `Data/3D/000000`
-- Verify file wasn't truncated during transfer
-
-#### No FL Data Shown (but file has FL)
-
-**Diagnostic:**
-```bash
-python -m tomocube info file.TCF
-```
-
-**Check for:**
-1. FL listed under "Fluorescence" section
-2. Channel names match what you're looking for (CH0, CH1, etc.)
-3. FL volume has non-zero dimensions
-
-**If FL exists but isn't visible:**
-1. Check layer visibility in viewer (eye icon)
-2. Adjust contrast limits (FL may be very dim)
-3. Check opacity slider
-
----
-
-### Common Error Messages
-
-| Error | Cause | Solution |
-|-------|-------|----------|
-| `FileNotFoundError` | Path incorrect or file missing | Check file path with quotes for spaces |
-| `TCFNoFluorescenceError` | Tried to export FL from HT-only file | Use `--no-fl` flag or different file |
-| `MemoryError` | File too large for available RAM | Use cropping or export subset |
-| `napari error: OpenGL` | GPU/driver issue | Update drivers or use software rendering |
-
----
-
-### Getting Help
-
-If issues persist:
-
-1. Run with verbose mode for diagnostic info:
-   ```bash
-   python -m tomocube -V <command> <file>
-   ```
-
-2. Check file structure:
-   ```bash
-   python -m tomocube info file.TCF
-   ```
-
-3. Test with minimal example:
-   ```python
-   from tomocube import TCFFileLoader
-   with TCFFileLoader("file.TCF") as loader:
-       loader.load_timepoint(0)
-       print(f"Shape: {loader.data_3d.shape}")
-   ```
+Validate that the TCF is readable HDF5 and has expected paths like `Data/3D/<timepoint>`.
