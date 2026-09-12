@@ -9,6 +9,7 @@ This module provides:
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -105,11 +106,77 @@ def _timepoint_key(name: str) -> tuple:
     return (0, int(name), name) if name.isdecimal() else (1, name)
 
 
-def _physical_ri(raw: np.ndarray) -> np.ndarray:
+def _physical_ri(raw: np.ndarray, *, divisor: float | None = None) -> np.ndarray:
     """Apply the TCF RI scale consistently to volumes and stored projections."""
-    scaled = np.issubdtype(raw.dtype, np.integer) or raw.max() > 100
+    if divisor is None:
+        divisor = 10000.0 if np.issubdtype(raw.dtype, np.integer) or raw.max() > 100 else 1.0
     data = raw.astype(np.float32)
-    return data / 10000.0 if scaled else data
+    return data / divisor if divisor != 1.0 else data
+
+
+def _block_depth(value: int) -> int:
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, (int, np.integer)) or value <= 0:
+        raise ValueError("block_depth must be a positive integer")
+    return int(value)
+
+
+def _volume_roi(
+    roi: Sequence[Sequence[int]] | None, shape: tuple[int, ...] | None
+) -> tuple[tuple[int, int], ...]:
+    """Validate native ZYX, integer, half-open bounds without clipping."""
+    if roi is None:
+        if shape is None:
+            raise ValueError("A volume shape is required when roi is omitted")
+        return tuple((0, int(size)) for size in shape)
+    try:
+        bounds = tuple(tuple(pair) for pair in roi)
+    except TypeError as error:
+        raise ValueError("roi must contain three (start, stop) pairs in ZYX order") from error
+    if len(bounds) != 3 or any(len(pair) != 2 for pair in bounds):
+        raise ValueError("roi must contain three (start, stop) pairs in ZYX order")
+    for axis, pair, size in zip("ZYX", bounds, shape if shape is not None else (None,) * 3):
+        if any(isinstance(value, (bool, np.bool_)) or not isinstance(value, (int, np.integer)) for value in pair):
+            raise ValueError(f"roi {axis} bounds must be integers")
+        start, stop = pair
+        if not 0 <= start < stop or (size is not None and stop > size):
+            limit = f" <= {size}" if size is not None else ""
+            raise ValueError(f"roi {axis} bounds must satisfy 0 <= start < stop{limit}; got {pair}")
+    return tuple((int(start), int(stop)) for start, stop in bounds)
+
+
+def _read_volume_blocks(
+    dataset: h5py.Dataset,
+    *,
+    roi: Sequence[Sequence[int]] | None = None,
+    block_depth: int = 16,
+    ri_divisor: float | None = None,
+) -> Iterator[np.ndarray]:
+    """Read finite Z slabs, optionally converting HT into float64 physical RI."""
+    depth = _block_depth(block_depth)
+    (z0, z1), (y0, y1), (x0, x1) = _volume_roi(roi, dataset.shape)
+    for start in range(z0, z1, depth):
+        block = dataset[start:min(start + depth, z1), y0:y1, x0:x1]
+        if not np.isfinite(block).all():
+            raise TCFFileError(f"{dataset.name} contains nonfinite intensities")
+        if ri_divisor is not None:
+            block = block.astype(np.float64) / ri_divisor
+        yield block
+
+
+def _dataset_ri_divisor(dataset: h5py.Dataset, *, block_depth: int = 16) -> float:
+    """Determine the existing TCF scaling convention over the entire dataset.
+
+    Integer RI data use a divisor of 10000. Floating data require a bounded
+    full-volume pass: any value above 100 identifies scaled storage. Metadata
+    extrema are not sufficient because they may be stale or in physical units.
+    This decision must be shared by every block and ROI from the dataset.
+    """
+    if np.issubdtype(dataset.dtype, np.integer):
+        return 10000.0
+    scaled = False
+    for block in _read_volume_blocks(dataset, block_depth=block_depth):
+        scaled = scaled or bool(block.max() > 100)
+    return 10000.0 if scaled else 1.0
 
 
 @dataclass
@@ -323,6 +390,7 @@ class TCFFileLoader:
         self._data_mip: np.ndarray | None = None
         self._fl_data: dict[str, np.ndarray] = {}
         self._current_timepoint: str | None = None
+        self._ri_divisors: dict[str, float] = {}
 
     @property
     def file(self) -> h5py.File:
@@ -415,21 +483,81 @@ class TCFFileLoader:
         if self.has_fluorescence:
             print(f"  FL channels: {self.fl_channels}")
 
-    def load_timepoint(self, idx: int) -> None:
+    def _timepoint_at(self, idx: int) -> str:
+        if isinstance(idx, (bool, np.bool_)) or not isinstance(idx, (int, np.integer)):
+            raise ValueError("Timepoint index must be an integer")
+        if idx < 0 or idx >= len(self.timepoints):
+            raise IndexError(f"Timepoint index {idx} out of range [0, {len(self.timepoints)})")
+        return self.timepoints[idx]
+
+    def iter_volume_blocks(
+        self,
+        idx: int,
+        *,
+        channel: str = "HT",
+        roi: Sequence[Sequence[int]] | None = None,
+        block_depth: int = 16,
+    ) -> Iterator[np.ndarray]:
+        """Yield Z slabs without loading or replacing the current acquisition.
+
+        ``roi`` contains three integer ``(start, stop)`` pairs in native ZYX
+        coordinates. HT blocks use float64 physical RI; FL retains its storage
+        dtype and native intensity units. Every read contains at most
+        ``block_depth`` Z planes. Float HT storage requires one bounded scan of
+        the complete dataset to establish its RI scale, cached until close().
+        The loader must remain open for the iterator's lifetime.
+        """
+        depth = _block_depth(block_depth)
+        tp = self._timepoint_at(idx)
+        if channel != "HT" and channel not in self.fl_channels:
+            raise ValueError(f"Unknown channel {channel!r}; available: HT, {', '.join(self.fl_channels)}")
+        path = f"{PATH_DATA_3D}/{tp}" if channel == "HT" else f"{PATH_DATA_3D_FL}/{channel}/{tp}"
+        if path not in self.file:
+            raise TCFFileError(f"Channel {channel!r} is missing at acquisition {tp!r}: {path}")
+        dataset = _volume_dataset(self.file[path])
+        bounds = _volume_roi(roi, dataset.shape)
+        divisor = None
+        if channel == "HT":
+            if path not in self._ri_divisors:
+                self._ri_divisors[path] = _dataset_ri_divisor(dataset, block_depth=depth)
+            divisor = self._ri_divisors[path]
+        yield from _read_volume_blocks(dataset, roi=bounds, block_depth=depth, ri_divisor=divisor)
+
+    def load_timepoint(self, idx: int, *, fl_channels: Sequence[str] | None = None) -> None:
         """
         Load data for a specific timepoint.
 
         Args:
             idx: Timepoint index
+            fl_channels: FL names to load. None loads all available channels;
+                an empty sequence loads HT only. Explicitly selected missing
+                channels raise before reading or changing the current arrays.
         """
-        if idx < 0 or idx >= len(self.timepoints):
-            raise IndexError(f"Timepoint index {idx} out of range [0, {len(self.timepoints)})")
-
-        tp = self.timepoints[idx]
+        tp = self._timepoint_at(idx)
+        channels = self.fl_channels if fl_channels is None else fl_channels
+        if isinstance(channels, (str, bytes)):
+            raise ValueError("fl_channels must be a sequence of channel names")
+        channels = list(channels)
+        if any(not isinstance(ch, str) or ch not in self.fl_channels for ch in channels):
+            raise ValueError(f"Unknown fluorescence channel; available: {', '.join(self.fl_channels)}")
+        if len(set(channels)) != len(channels):
+            raise ValueError("fl_channels must not contain duplicates")
+        if fl_channels is not None:
+            for ch in channels:
+                if f"{PATH_DATA_3D_FL}/{ch}/{tp}" not in self.file:
+                    raise TCFFileError(f"Channel {ch!r} is missing at acquisition {tp!r}")
 
         # Stage all arrays before replacing the current acquisition. A failed
         # read must not mix new HT pixels with a previous MIP or FL channel.
-        data_3d = _physical_ri(np.asarray(_volume_dataset(self.file[f"{PATH_DATA_3D}/{tp}"])))
+        ht_path = f"{PATH_DATA_3D}/{tp}"
+        raw = np.asarray(_volume_dataset(self.file[ht_path]))
+        if not np.isfinite(raw).all():
+            raise TCFFileError(f"{ht_path} contains nonfinite intensities")
+        divisor = self._ri_divisors.get(ht_path)
+        if divisor is None:
+            divisor = 10000.0 if np.issubdtype(raw.dtype, np.integer) or raw.max() > 100 else 1.0
+        data_3d = _physical_ri(raw, divisor=divisor)
+        del raw
 
         # Load or compute MIP (in physical RI units)
         mip_path = f"{PATH_DATA_2D_MIP}/{tp}"
@@ -442,7 +570,7 @@ class TCFFileLoader:
             data_mip = np.max(data_3d, axis=0)
 
         fl_data = {}
-        for ch in self.fl_channels:
+        for ch in channels:
             path = f"{PATH_DATA_3D_FL}/{ch}/{tp}"
             if path in self.file:
                 fl_data[ch] = np.asarray(_volume_dataset(self.file[path]))
@@ -451,6 +579,7 @@ class TCFFileLoader:
         self._data_mip = data_mip
         self._fl_data = fl_data
         self._current_timepoint = tp
+        self._ri_divisors[ht_path] = divisor
 
     def get_fl_contrast(self, channel: str) -> tuple[float, float]:
         """
@@ -490,6 +619,7 @@ class TCFFileLoader:
         self._tcf_info = None
         self._reg_params = None
         self._current_timepoint = None
+        self._ri_divisors.clear()
 
     def __enter__(self) -> TCFFileLoader:
         """Context manager entry."""

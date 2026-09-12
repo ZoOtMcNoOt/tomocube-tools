@@ -169,3 +169,98 @@ def test_missing_channel_at_later_timepoint_clears_previous_fl(make_tcf):
         assert "CH1" in loader.fl_data
         loader.load_timepoint(1)
         assert list(loader.fl_data) == ["CH0"]
+
+
+def test_selective_fluorescence_loading_reads_only_requested_channels(make_tcf, monkeypatch):
+    path = make_tcf(fluorescence=True)
+    original = h5py.Dataset.__array__
+    reads = []
+
+    def track(dataset, *args, **kwargs):
+        reads.append(dataset.name)
+        return original(dataset, *args, **kwargs)
+
+    monkeypatch.setattr(h5py.Dataset, "__array__", track)
+    with TCFFileLoader(path) as loader:
+        loader.load_timepoint(0, fl_channels=["CH1"])
+        assert list(loader.fl_data) == ["CH1"]
+        assert reads == ["/Data/3D/000000", "/Data/3DFL/CH1/000000"]
+        reads.clear()
+        loader.load_timepoint(0, fl_channels=[])
+        assert loader.fl_data == {}
+        assert reads == ["/Data/3D/000000"]
+
+
+def test_explicit_missing_channel_preserves_loaded_acquisition(make_tcf):
+    raw = np.ones((2, 3, 4), dtype=np.uint16) * 13300
+    path = make_tcf(timepoints={"0": raw, "1": raw + 100}, fluorescence=True)
+    with h5py.File(path, "a") as file:
+        del file["Data/3DFL/CH1/1"]
+    with TCFFileLoader(path) as loader:
+        loader.load_timepoint(0)
+        previous = loader.data_3d
+        previous_fl = loader.fl_data
+        with pytest.raises(TCFFileError, match="CH1.*missing.*1"):
+            loader.load_timepoint(1, fl_channels=["CH1"])
+        assert loader.data_3d is previous
+        assert loader.fl_data is previous_fl
+        assert loader.current_timepoint == "0"
+
+
+@pytest.mark.parametrize("channels", ["CH0", ["unknown"], ["CH0", "CH0"]])
+def test_invalid_selective_channels_rejected(make_tcf, channels):
+    with TCFFileLoader(make_tcf(fluorescence=True)) as loader:
+        with pytest.raises(ValueError):
+            loader.load_timepoint(0, fl_channels=channels)
+
+
+def test_block_reads_preserve_eager_state_and_native_fluorescence(make_tcf):
+    raw = np.arange(120, dtype=np.uint16).reshape(5, 4, 6) + 13300
+    path = make_tcf(timepoints={"0": raw, "1": raw + 100}, fluorescence=True)
+    with TCFFileLoader(path) as loader:
+        loader.load_timepoint(0)
+        previous = loader.data_3d
+        blocks = list(loader.iter_volume_blocks(1, roi=((1, 5), (1, 3), (2, 6)), block_depth=2))
+        assert len(blocks) == 2
+        assert blocks[0].dtype == np.float64
+        np.testing.assert_allclose(np.concatenate(blocks), (raw + 100)[1:5, 1:3, 2:6] / 10000)
+        fluorescence = list(loader.iter_volume_blocks(1, channel="CH1", block_depth=2))
+        assert fluorescence[0].dtype == np.uint16
+        np.testing.assert_array_equal(np.concatenate(fluorescence), np.arange(120).reshape(5, 4, 6))
+        assert loader.data_3d is previous
+        assert loader.current_timepoint == "0"
+
+
+def test_streaming_float_scale_cache_is_dataset_wide_and_cleared_on_close(make_tcf, monkeypatch):
+    raw = np.ones((5, 3, 4), dtype=np.float32) * 40
+    raw[-1] = 14000
+    path = make_tcf(timepoints={"0": raw})
+    original = h5py.Dataset.__getitem__
+    reads = []
+
+    def track(dataset, selection, *args, **kwargs):
+        reads.append(selection)
+        return original(dataset, selection, *args, **kwargs)
+
+    monkeypatch.setattr(h5py.Dataset, "__getitem__", track)
+    loader = TCFFileLoader(path)
+    with loader:
+        roi = ((0, 1), (0, 3), (0, 4))
+        block, = loader.iter_volume_blocks(0, roi=roi, block_depth=2)
+        np.testing.assert_array_equal(block, np.full((1, 3, 4), 0.004))
+        assert len(reads) == 4
+        reads.clear()
+        list(loader.iter_volume_blocks(0, roi=roi, block_depth=2))
+        assert len(reads) == 1
+        with pytest.raises(RuntimeError, match="No data loaded"):
+            _ = loader.data_3d
+    assert loader._ri_divisors == {}
+
+
+@pytest.mark.parametrize("idx", [True, 0.0, "0"])
+def test_loader_rejects_noninteger_timepoint_indices(make_tcf, idx):
+    with TCFFileLoader(make_tcf()) as loader:
+        with pytest.raises(ValueError, match="integer"):
+            loader.load_timepoint(idx)
+        with pytest.raises(ValueError, match="integer"):
+            list(loader.iter_volume_blocks(idx))
