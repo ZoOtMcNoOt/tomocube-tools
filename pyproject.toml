@@ -1,7 +1,12 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "tomocube-tools"
-version = "1.0.0"
+dynamic = ["version"]
 description = "Tools for working with Tomocube TCF files"
+readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "h5py",
@@ -13,10 +18,24 @@ dependencies = [
     "imagecodecs",
 ]
 
+[project.scripts]
+tomocube = "tomocube.__main__:main"
+
 [project.optional-dependencies]
+dev = ["pytest>=7", "build"]
 matlab = ["hdf5storage"]
 3d = ["napari[all]>=0.4.19", "imageio-ffmpeg", "pyqtgraph"]
 all = ["hdf5storage", "napari[all]>=0.4.19", "imageio-ffmpeg", "pyqtgraph"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.dynamic]
+version = {attr = "tomocube.__version__"}
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = ["error"]
 
 [tool.pyright]
 pythonVersion = "3.10"

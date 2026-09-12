@@ -2,7 +2,12 @@
 /output/*
 
 *.pyc
+__pycache__/
+.venv*/
+.pytest_cache/
+build/
+dist/
+*.egg-info/
 .claude/
-tomocube_tools.egg-info/
 
 TODO.md

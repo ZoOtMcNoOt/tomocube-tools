@@ -12,6 +12,8 @@ Python library and CLI for working with Tomocube TCF (Tomocube Cell File) holoto
 - Render 3D volumes in napari (`view3d`) with camera presets, crop controls, layer controls, histogram, FL Z-offset slider, and animation export widgets.
 - Register fluorescence (FL) into HT space (`start`, `center`, `auto` modes).
 - Export to TIFF, MATLAB `.mat`, PNG sequence (API), and GIF.
+- Select acquisition timepoints for TIFF, MAT, and GIF exports, and choose fluorescence channels for GIFs.
+- Preserve independent X/Y/Z calibration and source/timepoint metadata in scientific TIFF and MAT exports.
 
 ## Installation
 
@@ -28,6 +30,8 @@ pip install -e ".[all]"
 
 Core package requirements come from `pyproject.toml` and include: `h5py`, `numpy`, `scipy`, `matplotlib`, `tifffile`, `imageio`, and `imagecodecs`.
 
+Installation also provides the `tomocube` command, equivalent to `python -m tomocube`.
+
 ## Quick Start
 
 ```bash
@@ -43,8 +47,14 @@ python -m tomocube view3d path/to/file.TCF
 # Export HT volume as 32-bit TIFF preserving physical RI values
 python -m tomocube tiff path/to/file.TCF output.tiff --32bit
 
+# Export the third acquisition (zero-based index)
+tomocube tiff path/to/file.TCF timepoint2.tiff --timepoint 2
+
 # Export HT+FL overlay GIF
 python -m tomocube gif path/to/file.TCF overlay.gif --overlay --z-offset-mode center
+
+# Choose a fluorescence channel for the overlay
+tomocube gif path/to/file.TCF channel1.gif --overlay --fl CH1
 ```
 
 ## CLI Commands
@@ -67,6 +77,9 @@ Key option notes:
 - `gif --overlay`: `--z-offset-mode` default is `start`.
 - `view3d`: `--z-offset-mode` default is `auto`.
 - `tiff`: CLI default is `--32bit` with physical RI values; `--16bit` requires `--normalize`.
+- `tiff`, `mat`, and `gif`: `--timepoint N` selects a zero-based acquisition index (default `0`). Numeric acquisition keys are sorted numerically, so `2` precedes `10`.
+- `gif`: `--fl CH1` selects a fluorescence channel; combine with `--overlay` to blend it with HT. `--fps` accepts integers from 1 to 100; GIF timing is rounded to 10 ms intervals.
+- Invalid export options are rejected before creating output files. Use `tomocube tiff --help`, `tomocube mat --help`, or `tomocube gif --help` for command-specific usage.
 
 Run `python -m tomocube help` for full CLI help text.
 
@@ -123,7 +136,19 @@ Info/Device                  optics/device metadata
 Info/MetaData/...            embedded config/experiment metadata
 ```
 
-The loader normalizes HT values to physical RI units when files store scaled integer-like values.
+The loader normalizes HT values to physical RI units when files store scaled integer-like values. Metadata accepts scalars and singleton arrays. Missing resolution attributes use the documented instrument defaults with a warning; invalid supplied calibration raises a clear error instead of silently substituting a different spacing.
+
+## Development and Verification
+
+```bash
+pip install -e ".[dev]"
+python -m pytest -q
+python -m build
+```
+
+The regression suite creates small synthetic TCF acquisitions and reads exported TIFF, MAT, GIF, and PNG files back to verify values, calibration, frame dimensions, timepoint selection, metadata handling, and error behavior. It requires no experimental data or GUI extras. CI runs on Linux with Python 3.10 and 3.14 and Windows with Python 3.12, then builds and installs the wheel.
+
+Interactive viewer behavior and instrument-specific registration should also be checked with representative acquisitions before research use; the synthetic suite does not establish registration accuracy on experimental data.
 
 ## Documentation
 
