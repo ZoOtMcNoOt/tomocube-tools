@@ -69,8 +69,8 @@ def extract_metadata(f: h5py.File) -> dict[str, Any]:
         device: dict[str, Any] = {}
         for key in dev.attrs.keys():
             val = np.asarray(dev.attrs[key])
-            if hasattr(val, "__len__") and len(val) == 1:
-                device[key] = val[0]
+            if val.size == 1:
+                device[key] = val.item()
             else:
                 device[key] = val
         metadata["device"] = device

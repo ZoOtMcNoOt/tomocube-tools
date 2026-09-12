@@ -10,14 +10,22 @@ Supported formats:
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import numpy as np
 
+from tomocube.processing.image import normalize_with_bounds
+
 if TYPE_CHECKING:
     from tomocube.core.file import TCFFileLoader
+
+
+def _gif_duration(fps: int) -> int:
+    """Validate the rate and round to GIF's 10 ms frame duration units."""
+    if not np.isfinite(fps) or not 0 < fps <= 100:
+        raise ValueError("fps must be greater than 0 and at most 100")
+    return max(10, round(100 / fps) * 10)
 
 
 def export_to_tiff(
@@ -58,6 +66,14 @@ def export_to_tiff(
     if not output_path.suffix.lower() in (".tif", ".tiff"):
         output_path = output_path.with_suffix(".tiff")
 
+    if bit_depth not in (16, 32):
+        raise ValueError(f"bit_depth must be 16 or 32, got {bit_depth}")
+    if bit_depth == 16 and not normalize:
+        raise ValueError("16-bit TIFF output requires normalize=True; use 32-bit to preserve values")
+    compression_map = {"lzw": "lzw", "zlib": "zlib", "none": None}
+    if compression not in compression_map:
+        raise ValueError(f"compression must be one of {list(compression_map)}, got {compression!r}")
+
     # Get data (already in physical RI units for HT)
     if channel.lower() == "ht":
         data = loader.data_3d
@@ -68,45 +84,46 @@ def export_to_tiff(
         data = loader.fl_data[channel]
         description = f"FL {channel} from {loader.tcf_path.name}"
 
+    description += f"; timepoint {loader.current_timepoint}"
+
     # Handle conversion based on bit depth and normalization
     if bit_depth == 32:
         if normalize:
             # 32-bit normalized (0-1 range)
             vmin, vmax = np.percentile(data, [0.1, 99.9])
-            data_out = np.clip((data - vmin) / (vmax - vmin), 0, 1).astype(np.float32)
-            description += " [normalized 0-1]"
+            data_out = normalize_with_bounds(data, vmin, vmax).astype(np.float32)
+            description += f" [normalized 0-1, original range {vmin:.4f}-{vmax:.4f}]"
         else:
             # 32-bit preserving physical values (recommended for scientific use)
             data_out = data.astype(np.float32)
-            description += f" [physical RI, range {data.min():.4f}-{data.max():.4f}]"
+            units = "physical RI" if channel.lower() == "ht" else "fluorescence intensity"
+            description += f" [{units}, range {data.min():.4f}-{data.max():.4f}]"
     elif bit_depth == 16:
         # 16-bit always requires normalization to map to 0-65535
         vmin, vmax = np.percentile(data, [0.1, 99.9])
-        data_norm = np.clip((data - vmin) / (vmax - vmin), 0, 1)
+        data_norm = normalize_with_bounds(data, vmin, vmax)
         data_out = (data_norm * 65535).astype(np.uint16)
         description += f" [normalized, original range {vmin:.4f}-{vmax:.4f}]"
-    else:
-        raise ValueError(f"bit_depth must be 16 or 32, got {bit_depth}")
 
     # Get resolution for metadata
-    res_xy = loader.reg_params.ht_res_x if channel.lower() == "ht" else loader.reg_params.fl_res_x
-    res_z = loader.reg_params.ht_res_z if channel.lower() == "ht" else loader.reg_params.fl_res_z
+    res_z, res_y, res_x = (
+        loader.tcf_info.ht_resolution if channel.lower() == "ht" else loader.tcf_info.fl_resolution
+    )
 
     # Save with ImageJ-compatible metadata
-    compression_map = {"lzw": "lzw", "zlib": "zlib", "none": None}
     tifffile.imwrite(
         output_path,
         data_out,
         imagej=True,
-        compression=compression_map.get(compression, "lzw"),
+        compression=compression_map[compression],
         metadata={
             "axes": "ZYX",
             "unit": "um",
             "spacing": res_z,
+            "Info": description,
         },
-        resolution=(1 / res_xy, 1 / res_xy),
-        resolutionunit="MICROMETER",
-        description=description,
+        resolution=(1 / res_x, 1 / res_y),
+        resolutionunit="NONE",
     )
 
     return output_path
@@ -166,15 +183,19 @@ def export_to_mat(
     if include_metadata:
         info = loader.tcf_info
         params = loader.reg_params
-        mat_dict["metadata"] = {
+        metadata = {
             "filename": str(loader.tcf_path.name),
-            "ht_shape": info.ht_shape,
+            "timepoint": loader.current_timepoint,
+            "ht_shape": loader.data_3d.shape,
             "ht_resolution_um": info.ht_resolution,
             "magnification": info.magnification,
             "numerical_aperture": info.numerical_aperture,
             "medium_ri": info.medium_ri,
             "has_fluorescence": info.has_fluorescence,
         }
+        # MATLAB structs cannot encode Python None. Omit unavailable values
+        # rather than inventing optical parameters for incomplete metadata.
+        mat_dict["metadata"] = {key: value for key, value in metadata.items() if value is not None}
         mat_dict["resolution"] = {
             "ht_res_x_um": params.ht_res_x,
             "ht_res_y_um": params.ht_res_y,
@@ -259,7 +280,7 @@ def export_to_gif(
         output_path: Output file path
         channel: "ht" for holotomography, or FL channel name
         axis: Animation axis ("z", "y", or "x")
-        fps: Frames per second
+        fps: Frames per second, greater than 0 and at most 100 (rounded to 10 ms)
         cmap: Matplotlib colormap name
         vmin, vmax: Value range for normalization
         loop: Number of loops (0 = infinite)
@@ -272,8 +293,9 @@ def export_to_gif(
     except ImportError:
         raise ImportError("Pillow package required: pip install Pillow")
 
-    import matplotlib.pyplot as plt
-    from matplotlib import cm
+    from matplotlib import colormaps
+
+    duration_ms = _gif_duration(fps)
 
     output_path = Path(output_path)
     if output_path.suffix.lower() != ".gif":
@@ -302,15 +324,14 @@ def export_to_gif(
         vmax = vmax if vmax is not None else p_vmax
 
     # Convert to images
-    colormap = cm.get_cmap(cmap)
+    colormap = colormaps[cmap]
     frames = []
     for slice_data in slices:
-        normalized = np.clip((slice_data - vmin) / (vmax - vmin), 0, 1)
+        normalized = normalize_with_bounds(slice_data, vmin, vmax)
         colored = (colormap(normalized)[:, :, :3] * 255).astype(np.uint8)
         frames.append(Image.fromarray(colored))
 
     # Save GIF
-    duration_ms = int(1000 / fps)
     frames[0].save(
         output_path,
         save_all=True,
@@ -342,7 +363,7 @@ def export_overlay_gif(
         output_path: Output file path
         fl_channel: FL channel name
         axis: Animation axis ("z", "y", or "x")
-        fps: Frames per second
+        fps: Frames per second, greater than 0 and at most 100 (rounded to 10 ms)
         fl_alpha: FL overlay alpha (0-1)
         ht_cmap: Colormap for HT
         loop: Number of loops (0 = infinite)
@@ -359,9 +380,15 @@ def export_overlay_gif(
     except ImportError:
         raise ImportError("Pillow package required: pip install Pillow")
 
-    from matplotlib import cm
+    from matplotlib import colormaps
 
     from tomocube.processing.registration import register_fl_to_ht
+
+    duration_ms = _gif_duration(fps)
+    if not np.isfinite(fl_alpha) or not 0 <= fl_alpha <= 1:
+        raise ValueError("fl_alpha must be between 0 and 1")
+    if z_offset_mode not in ("start", "center", "auto"):
+        raise ValueError("z_offset_mode must be 'start', 'center', or 'auto'")
 
     output_path = Path(output_path)
     if output_path.suffix.lower() != ".gif":
@@ -387,7 +414,7 @@ def export_overlay_gif(
     else:
         fl_vmin, fl_vmax = 0, 1
 
-    ht_cmap_obj = cm.get_cmap(ht_cmap)
+    ht_cmap_obj = colormaps[ht_cmap]
     frames = []
 
     # Get number of slices based on axis
@@ -413,11 +440,11 @@ def export_overlay_gif(
             fl_slice = fl_registered[:, :, i]
 
         # HT slice
-        ht_norm = np.clip((ht_slice - ht_vmin) / (ht_vmax - ht_vmin), 0, 1)
+        ht_norm = normalize_with_bounds(ht_slice, ht_vmin, ht_vmax)
         ht_rgb = ht_cmap_obj(ht_norm)[:, :, :3]
 
         # FL slice (green overlay)
-        fl_norm = np.clip((fl_slice - fl_vmin) / (fl_vmax - fl_vmin), 0, 1)
+        fl_norm = normalize_with_bounds(fl_slice, fl_vmin, fl_vmax)
         fl_rgb = np.zeros((*fl_norm.shape, 3))
         fl_rgb[:, :, 1] = fl_norm
 
@@ -427,7 +454,6 @@ def export_overlay_gif(
         frame = (np.clip(blended, 0, 1) * 255).astype(np.uint8)
         frames.append(Image.fromarray(frame))
 
-    duration_ms = int(1000 / fps)
     frames[0].save(
         output_path,
         save_all=True,

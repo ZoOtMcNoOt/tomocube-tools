@@ -1,0 +1,2 @@
+include INSTRUCTIONS.md DATA_ANALYSIS.md
+recursive-include tests *.py

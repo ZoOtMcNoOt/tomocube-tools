@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import Any
 
 import h5py
 import numpy as np
@@ -23,7 +23,6 @@ from tomocube.core.constants import (
     ATTR_NA,
     ATTR_OFFSET_Z,
     ATTR_REG_ROTATION,
-    ATTR_REG_SCALE,
     ATTR_REG_TRANSLATION_X,
     ATTR_REG_TRANSLATION_Y,
     ATTR_RESOLUTION_X,
@@ -40,29 +39,77 @@ from tomocube.core.constants import (
     DEFAULT_HT_RES_Y,
     DEFAULT_HT_RES_Z,
     PATH_DATA_3D,
+    PATH_DATA_2D_MIP,
     PATH_DATA_3D_FL,
     PATH_FL_REGISTRATION,
     PATH_INFO_DEVICE,
     get_instrument_defaults,
 )
+from tomocube.core.exceptions import TCFFileError, TCFParseError
 from tomocube.core.types import RegistrationParams
-
-if TYPE_CHECKING:
-    pass
 
 logger = logging.getLogger(__name__)
 
 
 def _as_group(item: h5py.Group | h5py.Dataset | h5py.Datatype) -> h5py.Group:
-    """Cast h5py item to Group, asserting type."""
-    assert isinstance(item, h5py.Group), f"Expected Group, got {type(item)}"
+    """Require a group, including when Python assertions are disabled."""
+    if not isinstance(item, h5py.Group):
+        raise TCFFileError(f"Expected an HDF5 group at {item.name}")
     return item
 
 
 def _as_dataset(item: h5py.Group | h5py.Dataset | h5py.Datatype) -> h5py.Dataset:
-    """Cast h5py item to Dataset, asserting type."""
-    assert isinstance(item, h5py.Dataset), f"Expected Dataset, got {type(item)}"
+    """Require a dataset and include its path in format errors."""
+    if not isinstance(item, h5py.Dataset):
+        raise TCFFileError(f"Expected an HDF5 dataset at {item.name}")
     return item
+
+
+def _read_attribute(item: h5py.Group | h5py.Dataset, name: str, default: Any = None) -> Any:
+    """Read one metadata value stored as either a scalar or singleton array."""
+    if name not in item.attrs:
+        return default
+    value = np.asarray(item.attrs[name])
+    if value.size != 1:
+        raise TCFParseError(f"{item.name} attribute {name} must contain exactly one value")
+    scalar = value.item()
+    return scalar.decode("utf-8") if isinstance(scalar, bytes) else scalar
+
+
+def _read_float_attribute(
+    item: h5py.Group | h5py.Dataset, name: str, default: float | None = None
+) -> float | None:
+    value = _read_attribute(item, name, default)
+    if value is None:
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError) as error:
+        raise TCFParseError(f"{item.name} attribute {name} must be numeric") from error
+    if not np.isfinite(number):
+        raise TCFParseError(f"{item.name} attribute {name} must be finite")
+    return number
+
+
+def _volume_dataset(item: h5py.Group | h5py.Dataset | h5py.Datatype) -> h5py.Dataset:
+    dataset = _as_dataset(item)
+    if dataset.ndim != 3 or any(size == 0 for size in dataset.shape):
+        raise TCFFileError(f"{dataset.name} must be a non-empty (Z, Y, X) volume; got {dataset.shape}")
+    if dataset.dtype.kind not in "iuf":
+        raise TCFFileError(f"{dataset.name} must contain real numeric values; got {dataset.dtype}")
+    return dataset
+
+
+def _timepoint_key(name: str) -> tuple:
+    """Sort numeric acquisition keys numerically, including unpadded keys."""
+    return (0, int(name), name) if name.isdecimal() else (1, name)
+
+
+def _physical_ri(raw: np.ndarray) -> np.ndarray:
+    """Apply the TCF RI scale consistently to volumes and stored projections."""
+    scaled = np.issubdtype(raw.dtype, np.integer) or raw.max() > 100
+    data = raw.astype(np.float32)
+    return data / 10000.0 if scaled else data
 
 
 @dataclass
@@ -109,81 +156,60 @@ class TCFFile:
         tcf = cls()
 
         # Read root attributes for device info first (needed for defaults)
-        if ATTR_DEVICE_MODEL_TYPE in f.attrs:
-            raw = np.asarray(f.attrs[ATTR_DEVICE_MODEL_TYPE])[0]
-            tcf.device_model = raw.decode() if isinstance(raw, bytes) else str(raw)
-        if ATTR_DEVICE_SERIAL in f.attrs:
-            raw = np.asarray(f.attrs[ATTR_DEVICE_SERIAL])[0]
-            tcf.device_serial = raw.decode() if isinstance(raw, bytes) else str(raw)
-        if ATTR_SOFTWARE_VERSION in f.attrs:
-            raw = np.asarray(f.attrs[ATTR_SOFTWARE_VERSION])[0]
-            tcf.software_version = raw.decode() if isinstance(raw, bytes) else str(raw)
+        for attr, field_name in (
+            (ATTR_DEVICE_MODEL_TYPE, "device_model"),
+            (ATTR_DEVICE_SERIAL, "device_serial"),
+            (ATTR_SOFTWARE_VERSION, "software_version"),
+        ):
+            value = _read_attribute(f, attr)
+            if value is not None:
+                setattr(tcf, field_name, str(value))
 
         # Device info from Info/Device
         if PATH_INFO_DEVICE in f:
             dev = _as_group(f[PATH_INFO_DEVICE])
-            if ATTR_MAGNIFICATION in dev.attrs:
-                tcf.magnification = float(np.asarray(dev.attrs[ATTR_MAGNIFICATION])[0])
-            if ATTR_NA in dev.attrs:
-                tcf.numerical_aperture = float(np.asarray(dev.attrs[ATTR_NA])[0])
-            if ATTR_RI in dev.attrs:
-                tcf.medium_ri = float(np.asarray(dev.attrs[ATTR_RI])[0])
+            tcf.magnification = _read_float_attribute(dev, ATTR_MAGNIFICATION)
+            tcf.numerical_aperture = _read_float_attribute(dev, ATTR_NA)
+            tcf.medium_ri = _read_float_attribute(dev, ATTR_RI)
 
         # Get instrument-specific defaults
         inst_defaults = get_instrument_defaults(tcf.device_model, tcf.magnification)
 
-        # Get timepoints
-        if PATH_DATA_3D in f:
-            group = _as_group(f[PATH_DATA_3D])
-            tcf.timepoints = sorted(group.keys())
-
-        # Get HT shape and resolution
-        if tcf.timepoints:
-            first_tp = tcf.timepoints[0]
-            if f"{PATH_DATA_3D}/{first_tp}" in f:
-                ds = _as_dataset(f[f"{PATH_DATA_3D}/{first_tp}"])
-                tcf.ht_shape = ds.shape
-
-            # Resolution from attributes (use instrument defaults if missing)
-            data_3d = _as_group(f[PATH_DATA_3D])
-            tcf.ht_resolution = (
-                float(np.asarray(data_3d.attrs.get(ATTR_RESOLUTION_Z, [inst_defaults["ht_res_z"]]))[0]),
-                float(np.asarray(data_3d.attrs.get(ATTR_RESOLUTION_Y, [inst_defaults["ht_res_xy"]]))[0]),
-                float(np.asarray(data_3d.attrs.get(ATTR_RESOLUTION_X, [inst_defaults["ht_res_xy"]]))[0]),
-            )
-
-            # RI range - convert from raw units (e.g., 13300) to physical (1.3300)
-            ds = _as_dataset(f[f"{PATH_DATA_3D}/{first_tp}"])
-            if ATTR_RI_MIN in ds.attrs:
-                raw_min = float(np.asarray(ds.attrs[ATTR_RI_MIN])[0])
-                tcf.ri_min = raw_min / 10000.0 if raw_min > 100 else raw_min
-            if ATTR_RI_MAX in ds.attrs:
-                raw_max = float(np.asarray(ds.attrs[ATTR_RI_MAX])[0])
-                tcf.ri_max = raw_max / 10000.0 if raw_max > 100 else raw_max
+        if PATH_DATA_3D not in f:
+            raise TCFFileError(f"Missing required HT group: {PATH_DATA_3D}")
+        group = _as_group(f[PATH_DATA_3D])
+        tcf.timepoints = sorted(group.keys(), key=_timepoint_key)
+        if not tcf.timepoints:
+            raise TCFFileError(f"No HT timepoints in {PATH_DATA_3D}")
+        # Validate dataset headers only; volume pixels remain lazy-loaded.
+        for tp in tcf.timepoints:
+            _volume_dataset(group[tp])
+        ds = _volume_dataset(group[tcf.timepoints[0]])
+        tcf.ht_shape = ds.shape
+        for attr, field_name in ((ATTR_RI_MIN, "ri_min"), (ATTR_RI_MAX, "ri_max")):
+            value = _read_float_attribute(ds, attr)
+            if value is not None:
+                setattr(tcf, field_name, value / 10000.0 if value > 100 else value)
 
         # Check for fluorescence
         if PATH_DATA_3D_FL in f:
-            tcf.has_fluorescence = True
             fl_group = _as_group(f[PATH_DATA_3D_FL])
-            tcf.fl_channels = sorted(fl_group.keys())
-
-            # FL resolution (use instrument defaults if missing)
-            tcf.fl_resolution = (
-                float(np.asarray(fl_group.attrs.get(ATTR_RESOLUTION_Z, [inst_defaults["fl_res_z"]]))[0]),
-                float(np.asarray(fl_group.attrs.get(ATTR_RESOLUTION_Y, [inst_defaults["fl_res_xy"]]))[0]),
-                float(np.asarray(fl_group.attrs.get(ATTR_RESOLUTION_X, [inst_defaults["fl_res_xy"]]))[0]),
-            )
-
-            # FL shapes per channel
-            for ch in tcf.fl_channels:
+            for ch in sorted(fl_group.keys()):
                 ch_group = _as_group(fl_group[ch])
-                ch_timepoints = sorted(ch_group.keys())
+                ch_timepoints = sorted(ch_group.keys(), key=_timepoint_key)
                 if ch_timepoints:
-                    ch_ds = _as_dataset(ch_group[ch_timepoints[0]])
+                    for tp in ch_timepoints:
+                        _volume_dataset(ch_group[tp])
+                    ch_ds = _volume_dataset(ch_group[ch_timepoints[0]])
+                    tcf.fl_channels.append(ch)
                     tcf.fl_shapes[ch] = ch_ds.shape
+            tcf.has_fluorescence = bool(tcf.fl_channels)
 
-            # Registration params (pass instrument defaults)
-            tcf.registration = load_registration_params(f, inst_defaults)
+        # Always retain measured HT spacing, including acquisitions without FL.
+        tcf.registration = load_registration_params(f, inst_defaults)
+        params = tcf.registration
+        tcf.ht_resolution = (params.ht_res_z, params.ht_res_y, params.ht_res_x)
+        tcf.fl_resolution = (params.fl_res_z, params.fl_res_y, params.fl_res_x)
 
         return tcf
 
@@ -200,8 +226,8 @@ def load_registration_params(f: h5py.File, inst_defaults: dict[str, float] | Non
         RegistrationParams with values from file (defaults used for missing attrs)
 
     Note:
-        This function is lenient - missing paths or attributes are logged
-        and defaults are used. This allows processing of partially complete files.
+        Missing paths or resolution attributes use instrument defaults. Present
+        but invalid values raise TCFParseError instead of changing calibration.
     """
     # Use provided instrument defaults or fall back to global defaults
     if inst_defaults is None:
@@ -218,100 +244,45 @@ def load_registration_params(f: h5py.File, inst_defaults: dict[str, float] | Non
     if PATH_FL_REGISTRATION in f:
         reg = _as_group(f[PATH_FL_REGISTRATION])
         if ATTR_REG_ROTATION in reg.attrs:
-            params.rotation = float(np.asarray(reg.attrs[ATTR_REG_ROTATION])[0])
+            params.rotation = _read_float_attribute(reg, ATTR_REG_ROTATION)
         # Note: params.scale from file is ignored - scaling is based purely on resolution ratios
         # since both HT and FL cover the same physical FOV
         if ATTR_REG_TRANSLATION_X in reg.attrs:
-            params.translation_x = float(np.asarray(reg.attrs[ATTR_REG_TRANSLATION_X])[0])
+            params.translation_x = _read_float_attribute(reg, ATTR_REG_TRANSLATION_X)
         if ATTR_REG_TRANSLATION_Y in reg.attrs:
-            params.translation_y = float(np.asarray(reg.attrs[ATTR_REG_TRANSLATION_Y])[0])
+            params.translation_y = _read_float_attribute(reg, ATTR_REG_TRANSLATION_Y)
     else:
         logger.debug("FL registration path not found, using default parameters")
 
-    # HT resolution (use instrument defaults if missing)
-    ht_using_defaults = False
-    if PATH_DATA_3D in f:
-        ht = _as_group(f[PATH_DATA_3D])
-        if ATTR_RESOLUTION_X in ht.attrs:
-            params.ht_res_x = float(np.asarray(ht.attrs[ATTR_RESOLUTION_X])[0])
-        else:
-            params.ht_res_x = inst_defaults["ht_res_xy"]
-            ht_using_defaults = True
-        if ATTR_RESOLUTION_Y in ht.attrs:
-            params.ht_res_y = float(np.asarray(ht.attrs[ATTR_RESOLUTION_Y])[0])
-        else:
-            params.ht_res_y = inst_defaults["ht_res_xy"]
-            ht_using_defaults = True
-        if ATTR_RESOLUTION_Z in ht.attrs:
-            params.ht_res_z = float(np.asarray(ht.attrs[ATTR_RESOLUTION_Z])[0])
-        else:
-            params.ht_res_z = inst_defaults["ht_res_z"]
-            ht_using_defaults = True
-        if ht_using_defaults:
-            logger.warning(
-                f"Missing HT resolution attributes, using instrument defaults "
-                f"(XY={inst_defaults['ht_res_xy']}, Z={inst_defaults['ht_res_z']} µm/px)."
-            )
-    else:
-        logger.debug("HT data path not found, using default resolution")
-
-    # FL resolution (use instrument defaults if missing)
-    fl_using_defaults = False
-    if PATH_DATA_3D_FL in f:
-        fl = _as_group(f[PATH_DATA_3D_FL])
-        if ATTR_RESOLUTION_X in fl.attrs:
-            params.fl_res_x = float(np.asarray(fl.attrs[ATTR_RESOLUTION_X])[0])
-        else:
-            params.fl_res_x = inst_defaults["fl_res_xy"]
-            fl_using_defaults = True
-        if ATTR_RESOLUTION_Y in fl.attrs:
-            params.fl_res_y = float(np.asarray(fl.attrs[ATTR_RESOLUTION_Y])[0])
-        else:
-            params.fl_res_y = inst_defaults["fl_res_xy"]
-            fl_using_defaults = True
-        if ATTR_RESOLUTION_Z in fl.attrs:
-            params.fl_res_z = float(np.asarray(fl.attrs[ATTR_RESOLUTION_Z])[0])
-        else:
-            params.fl_res_z = inst_defaults["fl_res_z"]
-            fl_using_defaults = True
-        if fl_using_defaults:
-            logger.warning(
-                f"Missing FL resolution attributes, using instrument defaults "
-                f"(XY={inst_defaults['fl_res_xy']}, Z={inst_defaults['fl_res_z']} µm/px)."
-            )
-    else:
-        logger.debug("FL data path not found, using default resolution")
+    for prefix, path in (("ht", PATH_DATA_3D), ("fl", PATH_DATA_3D_FL)):
+        group = _as_group(f[path]) if path in f else None
+        missing = []
+        for axis, attr in (("x", ATTR_RESOLUTION_X), ("y", ATTR_RESOLUTION_Y), ("z", ATTR_RESOLUTION_Z)):
+            default = inst_defaults[f"{prefix}_res_{'z' if axis == 'z' else 'xy'}"]
+            value = _read_float_attribute(group, attr, default) if group is not None else default
+            if value <= 0 or not np.isfinite(value):
+                raise TCFParseError(f"{path} attribute {attr} must be positive and finite")
+            setattr(params, f"{prefix}_res_{axis}", value)
+            if group is not None and attr not in group.attrs:
+                missing.append(attr)
+        if missing:
+            logger.warning("Missing %s attributes %s; using instrument defaults", path, ", ".join(missing))
 
     # FL Z offsets - read per-channel offsets
     channel_offsets: dict[str, float] = {}
     if PATH_DATA_3D_FL in f:
         fl_group = _as_group(f[PATH_DATA_3D_FL])
-        for ch_name in fl_group.keys():
+        for ch_name in sorted(fl_group.keys()):
             ch_path = f"{PATH_DATA_3D_FL}/{ch_name}"
             if ch_path in f:
                 ch = _as_group(f[ch_path])
                 if ATTR_OFFSET_Z in ch.attrs:
-                    offset = float(np.asarray(ch.attrs[ATTR_OFFSET_Z])[0])
+                    offset = _read_float_attribute(ch, ATTR_OFFSET_Z)
                     channel_offsets[ch_name] = offset
-                    # Use first channel offset as default
-                    if params.fl_offset_z == 0.0:
-                        params.fl_offset_z = offset
 
     if channel_offsets:
         params.channel_offsets_z = channel_offsets
-
-    # Validate resolution values are positive
-    if params.ht_res_x <= 0 or params.ht_res_y <= 0 or params.ht_res_z <= 0:
-        logger.warning("Invalid HT resolution values, using defaults")
-        params.ht_res_x = DEFAULT_HT_RES_X
-        params.ht_res_y = DEFAULT_HT_RES_Y
-        params.ht_res_z = DEFAULT_HT_RES_Z
-
-    if params.fl_res_x <= 0 or params.fl_res_y <= 0 or params.fl_res_z <= 0:
-        logger.warning("Invalid FL resolution values, using defaults")
-        params.fl_res_x = DEFAULT_FL_RES_X
-        params.fl_res_y = DEFAULT_FL_RES_Y
-        params.fl_res_z = DEFAULT_FL_RES_Z
+        params.fl_offset_z = next(iter(channel_offsets.values()))
 
     return params
 
@@ -325,7 +296,8 @@ class TCFFileLoader:
     Usage:
         loader = TCFFileLoader(path)
         loader.load()
-        data = loader.get_timepoint_data(0)
+        loader.load_timepoint(0)
+        data = loader.data_3d
         loader.close()
 
     Or with context manager:
@@ -350,6 +322,7 @@ class TCFFileLoader:
         self._data_3d: np.ndarray | None = None
         self._data_mip: np.ndarray | None = None
         self._fl_data: dict[str, np.ndarray] = {}
+        self._current_timepoint: str | None = None
 
     @property
     def file(self) -> h5py.File:
@@ -397,6 +370,13 @@ class TCFFileLoader:
         return self.tcf_info.timepoints
 
     @property
+    def current_timepoint(self) -> str:
+        """Acquisition key for the currently loaded arrays."""
+        if self._current_timepoint is None:
+            raise RuntimeError("No data loaded. Call load_timepoint() first.")
+        return self._current_timepoint
+
+    @property
     def has_fluorescence(self) -> bool:
         """Check if file has fluorescence data."""
         return self.tcf_info.has_fluorescence
@@ -413,14 +393,21 @@ class TCFFileLoader:
         Opens the HDF5 file and extracts metadata. Does not load volume data
         until load_timepoint() is called.
         """
+        if self._file is not None and self._file.id.valid:
+            return
+        self.close()
         logger.debug(f"Loading TCF file: {self.tcf_path}")
         print(f"Loading: {self.tcf_path.name}")
 
-        self._file = h5py.File(self.tcf_path, "r")
-        self._tcf_info = TCFFile.from_hdf5(self._file)
-
-        if self._tcf_info.registration is not None:
-            self._reg_params = self._tcf_info.registration
+        file = h5py.File(self.tcf_path, "r")
+        try:
+            info = TCFFile.from_hdf5(file)
+        except BaseException:
+            file.close()
+            raise
+        self._file = file
+        self._tcf_info = info
+        self._reg_params = info.registration
 
         print(f"  Timepoints: {len(self.timepoints)}")
         print(f"  Shape: {self._tcf_info.ht_shape}")
@@ -440,42 +427,30 @@ class TCFFileLoader:
 
         tp = self.timepoints[idx]
 
-        # Load HT volume and convert to physical RI units
-        # TCF files store RI as integers scaled by 10000 (e.g., 13300 = 1.3300)
-        raw_data = np.asarray(self.file[f"Data/3D/{tp}"])
-        if raw_data.dtype in (np.int16, np.int32, np.uint16, np.uint32):
-            # Integer data - convert to physical RI (divide by 10000)
-            self._data_3d = raw_data.astype(np.float32) / 10000.0
-        elif raw_data.max() > 100:
-            # Float data but still in raw units (values like 13300.0)
-            self._data_3d = raw_data.astype(np.float32) / 10000.0
-        else:
-            # Already in physical units
-            self._data_3d = raw_data.astype(np.float32)
+        # Stage all arrays before replacing the current acquisition. A failed
+        # read must not mix new HT pixels with a previous MIP or FL channel.
+        data_3d = _physical_ri(np.asarray(_volume_dataset(self.file[f"{PATH_DATA_3D}/{tp}"])))
 
         # Load or compute MIP (in physical RI units)
-        mip_path = f"Data/2DMIP/{tp}"
+        mip_path = f"{PATH_DATA_2D_MIP}/{tp}"
         if mip_path in self.file:
-            raw_mip = np.asarray(self.file[mip_path])
-            if raw_mip.max() > 100:
-                self._data_mip = raw_mip.astype(np.float32) / 10000.0
-            else:
-                self._data_mip = raw_mip.astype(np.float32)
+            mip_ds = _as_dataset(self.file[mip_path])
+            if mip_ds.shape != data_3d.shape[1:] or mip_ds.dtype.kind not in "iuf":
+                raise TCFFileError(f"{mip_path} must be a numeric projection with shape {data_3d.shape[1:]}")
+            data_mip = _physical_ri(np.asarray(mip_ds))
         else:
-            self._data_mip = np.max(self._data_3d, axis=0)
+            data_mip = np.max(data_3d, axis=0)
 
-        # Load fluorescence if available
-        if self.has_fluorescence:
-            self._load_fluorescence(tp)
-
-    def _load_fluorescence(self, timepoint: str) -> None:
-        """Load fluorescence data for all channels."""
-        self._fl_data.clear()
-
+        fl_data = {}
         for ch in self.fl_channels:
-            path = f"Data/3DFL/{ch}/{timepoint}"
+            path = f"{PATH_DATA_3D_FL}/{ch}/{tp}"
             if path in self.file:
-                self._fl_data[ch] = np.asarray(self.file[path])
+                fl_data[ch] = np.asarray(_volume_dataset(self.file[path]))
+
+        self._data_3d = data_3d
+        self._data_mip = data_mip
+        self._fl_data = fl_data
+        self._current_timepoint = tp
 
     def get_fl_contrast(self, channel: str) -> tuple[float, float]:
         """
@@ -510,6 +485,9 @@ class TCFFileLoader:
         self._data_3d = None
         self._data_mip = None
         self._fl_data.clear()
+        self._tcf_info = None
+        self._reg_params = None
+        self._current_timepoint = None
 
     def __enter__(self) -> TCFFileLoader:
         """Context manager entry."""

@@ -6,6 +6,7 @@ Run 'python -m tomocube help' for usage information.
 
 from __future__ import annotations
 
+import argparse
 import os
 import re
 import shutil
@@ -259,11 +260,15 @@ class Spinner:
         self.stop()
 
     def start(self) -> None:
+        if not sys.stdout.isatty():
+            return
         self._stop = False
         self._thread = threading.Thread(target=self._spin, daemon=True)
         self._thread.start()
 
     def stop(self, success: bool = True) -> None:
+        if self._thread is None:
+            return
         self._stop = True
         if self._thread:
             self._thread.join(timeout=0.5)
@@ -319,21 +324,15 @@ class ProgressBar:
         sys.stdout.flush()
 
 
-# Disable colors if not a TTY or on Windows without ANSI support
-if not sys.stdout.isatty():
-    Style.disable()
-    Icons.disable()
-
-# Enable UTF-8 output on Windows
-if sys.platform == "win32":
-    import io
-
-    sys.stdout = io.TextIOWrapper(
-        sys.stdout.buffer, encoding="utf-8", errors="replace"
-    )
-    sys.stderr = io.TextIOWrapper(
-        sys.stderr.buffer, encoding="utf-8", errors="replace"
-    )
+def _configure_terminal() -> None:
+    """Configure CLI output without replacing or closing caller-owned streams."""
+    if not sys.stdout.isatty() or "NO_COLOR" in os.environ:
+        Style.disable()
+        Icons.disable()
+    if sys.platform == "win32":
+        for stream in (sys.stdout, sys.stderr):
+            if hasattr(stream, "reconfigure"):
+                stream.reconfigure(encoding="utf-8", errors="replace")
 
 
 def _styled(text: str, *styles: str) -> str:
@@ -443,6 +442,8 @@ class Panel:
 
 def _print_logo(compact: bool = False) -> None:
     """Print the Tomocube Tools logo."""
+    from tomocube import __version__
+
     s = Style
     i = Icons
     width = _get_content_width()
@@ -485,13 +486,13 @@ def _print_logo(compact: bool = False) -> None:
         tagline = "Holotomography Data Processing Tools"
         padding = (55 - len(tagline)) // 2
         print(f"  {s.BRIGHT_BLACK}│{' ' * padding}{s.RESET}{s.DIM}{tagline}{s.RESET}{s.BRIGHT_BLACK}{' ' * (55 - len(tagline) - padding - 2)}│{s.RESET}")
-        print(f"  {s.BRIGHT_BLACK}│{' ' * 20}{s.RESET}{s.BRIGHT_CYAN}v0.1.0{s.RESET}{s.BRIGHT_BLACK}{' ' * 27}│{s.RESET}")
+        print(f"  {s.BRIGHT_BLACK}│{' ' * 20}{s.RESET}{s.BRIGHT_CYAN}v{__version__}{s.RESET}{s.BRIGHT_BLACK}{' ' * max(0, 32 - len(__version__))}│{s.RESET}")
         print()
     else:
         # Compact logo for narrow terminals
         print(_gradient_line(width))
         print()
-        print(f"  {s.BRIGHT_CYAN}{s.BOLD}{i.DIAMOND} TOMOCUBE{s.RESET} {s.CYAN}TOOLS{s.RESET}  {s.BRIGHT_BLACK}v0.1.0{s.RESET}")
+        print(f"  {s.BRIGHT_CYAN}{s.BOLD}{i.DIAMOND} TOMOCUBE{s.RESET} {s.CYAN}TOOLS{s.RESET}  {s.BRIGHT_BLACK}v{__version__}{s.RESET}")
         print(f"  {s.DIM}Holotomography data processing{s.RESET}")
         print()
         print(_gradient_line(width))
@@ -600,6 +601,12 @@ def _print_help() -> None:
     print()
 
     # Keyboard shortcuts in a styled grid
+    print(f"  {s.BOLD}Export selection{s.RESET}")
+    print(f"    {s.CYAN}--timepoint N{s.RESET}  Zero-based acquisition index for tiff, mat, and gif")
+    print(f"    {s.CYAN}gif --fl CH1{s.RESET}   Select a fluorescence channel; add --overlay to blend with HT")
+    print(f"    Use {s.CYAN}<command> --help{s.RESET} for validated export options and defaults.")
+    print()
+
     print(f"  {s.BRIGHT_WHITE}{s.BOLD}VIEWER SHORTCUTS{s.RESET}")
     print(_gradient_line(width))
     print()
@@ -916,6 +923,7 @@ def _print_export_header(title: str, input_file: str) -> None:
 
 def main() -> int:
     """Main CLI entry point."""
+    _configure_terminal()
     if len(sys.argv) < 2:
         _print_short_usage()
         return 1
@@ -944,8 +952,10 @@ def main() -> int:
 
     # Version command
     if command in ("version", "-v", "--version"):
+        from tomocube import __version__
+
         s = Style
-        print(f"{s.BRIGHT_CYAN}tomocube-tools{s.RESET} {s.DIM}v0.1.0{s.RESET}")
+        print(f"{s.BRIGHT_CYAN}tomocube-tools{s.RESET} {s.DIM}v{__version__}{s.RESET}")
         return 0
 
     # Get remaining args as list to preserve paths with spaces
@@ -1054,6 +1064,54 @@ def _print_subcommand_help(name: str, usage: str, options: list[tuple[str, str, 
             print()
 
 
+def _timepoint_index(value: str) -> int:
+    try:
+        index = int(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("timepoint must be a non-negative integer") from error
+    if index < 0:
+        raise argparse.ArgumentTypeError("timepoint must be a non-negative integer")
+    return index
+
+
+def _frame_rate(value: str) -> int:
+    try:
+        fps = int(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("fps must be an integer between 1 and 100") from error
+    if not 1 <= fps <= 100:
+        raise argparse.ArgumentTypeError("fps must be an integer between 1 and 100")
+    return fps
+
+
+def _parse_export_args(command: str, args: list[str]) -> argparse.Namespace:
+    """Validate export requests before opening files or creating outputs."""
+    parser = argparse.ArgumentParser(prog=f"python -m tomocube {command}", allow_abbrev=False)
+    parser.add_argument("file", metavar="file.TCF", help="input TCF acquisition")
+    parser.add_argument("output", nargs="?", help="output path (defaults to the input stem)")
+    parser.add_argument("--timepoint", type=_timepoint_index, default=0, metavar="N",
+                        help="zero-based timepoint index (default: 0; numeric key order)")
+    if command == "tiff":
+        parser.add_argument("--fl", metavar="CHANNEL", help="export this fluorescence channel instead of HT")
+        depth = parser.add_mutually_exclusive_group()
+        depth.add_argument("--16bit", dest="bit_depth", action="store_const", const=16)
+        depth.add_argument("--32bit", dest="bit_depth", action="store_const", const=32)
+        parser.set_defaults(bit_depth=32)
+        parser.add_argument("--normalize", action="store_true", help="normalize values for visualization")
+    elif command == "mat":
+        parser.add_argument("--no-fl", action="store_true", help="exclude fluorescence data")
+    elif command == "gif":
+        parser.add_argument("--overlay", action="store_true", help="blend HT and fluorescence")
+        parser.add_argument("--fl", metavar="CHANNEL", help="FL channel (overlay default: CH0)")
+        parser.add_argument("--fps", type=_frame_rate, default=10, help="1-100 fps, rounded to 10 ms frame intervals")
+        parser.add_argument("--axis", choices=("z", "y", "x"), default="z")
+        parser.add_argument("--z-offset-mode", choices=("start", "center", "auto"), default="start")
+    options = parser.parse_intermixed_args(args)
+    if command == "tiff" and options.bit_depth == 16 and not options.normalize:
+        parser.error("--16bit requires --normalize; use --32bit to preserve physical values")
+    return options
+
+
 def _convert_tiff(args: list[str]) -> int:
     """Convert TCF to TIFF stack."""
     from tomocube.core.file import TCFFileLoader
@@ -1070,6 +1128,7 @@ def _convert_tiff(args: list[str]) -> int:
                 ("--16bit", "", "16-bit output (requires --normalize)"),
                 ("--32bit", "", "32-bit float output (default, preserves RI values)"),
                 ("--normalize", "", "Normalize values for visualization (required for 16-bit)"),
+                ("--timepoint", "<N>", "Zero-based timepoint index (default: 0)"),
             ],
             [
                 ("Export with physical RI values", "python -m tomocube tiff sample.TCF"),
@@ -1080,39 +1139,19 @@ def _convert_tiff(args: list[str]) -> int:
         )
         return 1
 
-    tcf_path = parts[0]
-    output_path = None
-    channel = "ht"
-    bit_depth = 32  # Default to 32-bit to preserve physical values
-    normalize = False  # Default to preserving physical RI values
-
-    i = 1
-    while i < len(parts):
-        if parts[i] == "--fl" and i + 1 < len(parts):
-            channel = parts[i + 1]
-            i += 2
-        elif parts[i] == "--16bit":
-            bit_depth = 16
-            i += 1
-        elif parts[i] == "--32bit":
-            bit_depth = 32
-            i += 1
-        elif parts[i] == "--normalize":
-            normalize = True
-            i += 1
-        elif not output_path:
-            output_path = parts[i]
-            i += 1
-        else:
-            i += 1
-
-    # 16-bit requires normalization
-    if bit_depth == 16 and not normalize:
-        _print_error("--16bit requires --normalize (cannot store RI values 1.33-1.40 in 16-bit without normalization)")
-        return 1
+    try:
+        options = _parse_export_args("tiff", parts)
+    except SystemExit as error:
+        return int(error.code)
+    tcf_path = options.file
+    output_path = options.output
+    channel = options.fl or "ht"
+    bit_depth = options.bit_depth
+    normalize = options.normalize
 
     if not output_path:
-        output_path = Path(tcf_path).stem + f"_{channel}.tiff"
+        suffix = f"_t{options.timepoint}" if options.timepoint else ""
+        output_path = Path(tcf_path).stem + f"{suffix}_{channel}.tiff"
 
     if not Path(tcf_path).exists():
         _print_error(f"File not found: {tcf_path}")
@@ -1130,7 +1169,7 @@ def _convert_tiff(args: list[str]) -> int:
     try:
         with TCFFileLoader(tcf_path) as loader:
             with Spinner("Loading data..."):
-                loader.load_timepoint(0)
+                loader.load_timepoint(options.timepoint)
             _print_step("Data loaded", "done")
 
             with Spinner("Converting to TIFF..."):
@@ -1159,6 +1198,7 @@ def _convert_mat(args: list[str]) -> int:
             "python -m tomocube mat <file.TCF> [output.mat] [options]",
             [
                 ("--no-fl", "", "Exclude fluorescence data"),
+                ("--timepoint", "<N>", "Zero-based timepoint index (default: 0)"),
             ],
             [
                 ("Export all data", "python -m tomocube mat sample.TCF"),
@@ -1166,30 +1206,25 @@ def _convert_mat(args: list[str]) -> int:
             ],
         )
         print(f"  {s.BOLD}Output Variables{s.RESET}")
-        print(f"    {s.CYAN}ht_data{s.RESET}           3D HT volume (Z x Y x X)")
-        print(f"    {s.CYAN}fl_CH0{s.RESET}, etc.      FL channel volumes")
-        print(f"    {s.CYAN}ht_resolution{s.RESET}     [Z, Y, X] resolution in um")
-        print(f"    {s.CYAN}magnification{s.RESET}     Objective magnification")
+        print(f"    {s.CYAN}ht_3d{s.RESET}             3D HT volume (Z x Y x X)")
+        print(f"    {s.CYAN}ht_mip{s.RESET}            Maximum intensity projection")
+        print(f"    {s.CYAN}fl_ch0{s.RESET}, etc.      FL channel volumes")
+        print(f"    {s.CYAN}metadata{s.RESET}          File, timepoint, and available optics metadata")
+        print(f"    {s.CYAN}resolution{s.RESET}        Spatial resolution in um")
         print()
         return 1
 
-    tcf_path = parts[0]
-    output_path = None
-    include_fl = True
-
-    i = 1
-    while i < len(parts):
-        if parts[i] == "--no-fl":
-            include_fl = False
-            i += 1
-        elif not output_path:
-            output_path = parts[i]
-            i += 1
-        else:
-            i += 1
+    try:
+        options = _parse_export_args("mat", parts)
+    except SystemExit as error:
+        return int(error.code)
+    tcf_path = options.file
+    output_path = options.output
+    include_fl = not options.no_fl
 
     if not output_path:
-        output_path = Path(tcf_path).stem + ".mat"
+        suffix = f"_t{options.timepoint}" if options.timepoint else ""
+        output_path = Path(tcf_path).stem + suffix + ".mat"
 
     if not Path(tcf_path).exists():
         _print_error(f"File not found: {tcf_path}")
@@ -1202,7 +1237,7 @@ def _convert_mat(args: list[str]) -> int:
     try:
         with TCFFileLoader(tcf_path) as loader:
             with Spinner("Loading data..."):
-                loader.load_timepoint(0)
+                loader.load_timepoint(options.timepoint)
             _print_step("Data loaded", "done")
             
             with Spinner("Converting to MAT..."):
@@ -1230,9 +1265,11 @@ def _convert_gif(args: list[str]) -> int:
             "python -m tomocube gif <file.TCF> [output.gif] [options]",
             [
                 ("--overlay", "", "Create HT+FL overlay animation"),
-                ("--fps", "<N>", "Frame rate (default: 10)"),
+                ("--fps", "<N>", "Frame rate, 1-100 (default: 10)"),
                 ("--axis", "<z|y|x>", "Slice axis for animation (default: z)"),
                 ("--z-offset-mode", "<mode>", "FL Z alignment: auto, start, center (default: start)"),
+                ("--timepoint", "<N>", "Zero-based timepoint index (default: 0)"),
+                ("--fl", "<channel>", "FL channel to export or overlay (overlay default: CH0)"),
             ],
             [
                 ("Z-stack animation", "python -m tomocube gif sample.TCF"),
@@ -1243,35 +1280,22 @@ def _convert_gif(args: list[str]) -> int:
         )
         return 1
 
-    tcf_path = parts[0]
-    output_path = None
-    overlay = False
-    fps = 10
-    axis = "z"
-    z_offset_mode = "start"
-
-    i = 1
-    while i < len(parts):
-        if parts[i] == "--overlay":
-            overlay = True
-            i += 1
-        elif parts[i] == "--fps" and i + 1 < len(parts):
-            fps = int(parts[i + 1])
-            i += 2
-        elif parts[i] == "--axis" and i + 1 < len(parts):
-            axis = parts[i + 1]
-            i += 2
-        elif parts[i] == "--z-offset-mode" and i + 1 < len(parts):
-            z_offset_mode = parts[i + 1]
-            i += 2
-        elif not output_path:
-            output_path = parts[i]
-            i += 1
-        else:
-            i += 1
+    try:
+        options = _parse_export_args("gif", parts)
+    except SystemExit as error:
+        return int(error.code)
+    tcf_path = options.file
+    output_path = options.output
+    overlay = options.overlay
+    fps = options.fps
+    axis = options.axis
+    z_offset_mode = options.z_offset_mode
 
     if not output_path:
-        suffix = "_overlay" if overlay else f"_{axis}"
+        suffix = f"_t{options.timepoint}" if options.timepoint else ""
+        if options.fl:
+            suffix += f"_{options.fl}"
+        suffix += "_overlay" if overlay else f"_{axis}"
         output_path = Path(tcf_path).stem + suffix + ".gif"
 
     if not Path(tcf_path).exists():
@@ -1287,7 +1311,7 @@ def _convert_gif(args: list[str]) -> int:
     try:
         with TCFFileLoader(tcf_path) as loader:
             with Spinner("Loading data..."):
-                loader.load_timepoint(0)
+                loader.load_timepoint(options.timepoint)
             _print_step("Data loaded", "done")
 
             if overlay:
@@ -1297,11 +1321,12 @@ def _convert_gif(args: list[str]) -> int:
                 with Spinner("Generating frames..."):
                     result = export_overlay_gif(
                         loader, output_path, axis=axis, fps=fps,
+                        fl_channel=options.fl or "CH0",
                         z_offset_mode=z_offset_mode
                     )
             else:
                 with Spinner("Generating frames..."):
-                    result = export_to_gif(loader, output_path, axis=axis, fps=fps)
+                    result = export_to_gif(loader, output_path, channel=options.fl or "ht", axis=axis, fps=fps)
         
         _print_step("Animation complete", "done")
         print()
