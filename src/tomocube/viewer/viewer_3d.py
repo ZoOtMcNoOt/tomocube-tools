@@ -60,9 +60,9 @@ class AnimationExporter:
         self._export_config = {"filename": filename, "duration_ms": float(duration_ms),
                                "current_frame": 0}
         self._original_state = {
-            "angles": self.viewer.camera.angles,
-            "center": self.viewer.camera.center,
-            "zoom": self.viewer.camera.zoom,
+            "angles": self.viewer.scene.camera.angles,
+            "center": self.viewer.scene.camera.center,
+            "zoom": self.viewer.scene.camera.zoom,
             "ndisplay": self.viewer.dims.ndisplay,
             "point": tuple(self.viewer.dims.point),
             "order": tuple(self.viewer.dims.order),
@@ -111,7 +111,7 @@ class AnimationExporter:
             return current, count, True
         if mode == "turntable":
             roll, pitch, yaw = self._original_state["angles"]
-            self.viewer.camera.angles = (roll, pitch, yaw + 360 * current / count)
+            self.viewer.scene.camera.angles = (roll, pitch, yaw + 360 * current / count)
         else:
             self.viewer.dims.set_point(cfg["axis"], cfg["start"] + current * cfg["step"])
         from qtpy.QtWidgets import QApplication
@@ -167,9 +167,9 @@ class AnimationExporter:
             self.viewer.dims.ndisplay = self._original_state["ndisplay"]
             for axis, point in enumerate(self._original_state["point"]):
                 self.viewer.dims.set_point(axis, point)
-            self.viewer.camera.angles = self._original_state["angles"]
-            self.viewer.camera.center = self._original_state["center"]
-            self.viewer.camera.zoom = self._original_state["zoom"]
+            self.viewer.scene.camera.angles = self._original_state["angles"]
+            self.viewer.scene.camera.center = self._original_state["center"]
+            self.viewer.scene.camera.zoom = self._original_state["zoom"]
         finally:
             self._is_exporting = False
             self._frames = []
@@ -736,7 +736,7 @@ def _create_camera_controls(viewer):
 
             zoom_fit = QPushButton("Fit [F]")
             zoom_fit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-            zoom_fit.clicked.connect(lambda: viewer.reset_view())
+            zoom_fit.clicked.connect(lambda: viewer.fit_to_view())
             zoom_row.addWidget(zoom_fit)
 
             layout.addLayout(zoom_row)
@@ -765,7 +765,7 @@ def _create_camera_controls(viewer):
 
             # Fit (F)
             fit_shortcut = QShortcut(QKeySequence("F"), window)
-            fit_shortcut.activated.connect(lambda: viewer.reset_view())
+            fit_shortcut.activated.connect(lambda: viewer.fit_to_view())
 
             # Zoom in/out
             zoom_in = QShortcut(QKeySequence("="), window)
@@ -778,16 +778,16 @@ def _create_camera_controls(viewer):
 
         def _set_view(self, angles):
             viewer.dims.ndisplay = 3
-            viewer.camera.angles = angles
+            viewer.scene.camera.angles = angles
 
         def _zoom(self, factor):
-            viewer.camera.zoom *= factor
+            viewer.scene.camera.zoom *= factor
 
         def _reset_camera(self):
             viewer.dims.ndisplay = 3
             self._set_view(self.default_angles)
-            viewer.camera.zoom = self.default_zoom
-            viewer.reset_view()
+            viewer.scene.camera.zoom = self.default_zoom
+            viewer.fit_to_view()
 
     widget = CameraWidget()
     dock = viewer.window.add_dock_widget(widget, name="Camera", area="left")
@@ -1176,13 +1176,9 @@ def view_3d(
 
     tcf_path = Path(tcf_path)
     with TCFFileLoader(tcf_path) as loader:
-        loader.load_timepoint(timepoint)
+        loader.load_timepoint(timepoint, fl_channels=[fl_channel] if fl_channel is not None else None)
         ht_data = loader.data_3d
-        if not np.isfinite(ht_data).all():
-            raise ValueError("HT volume must contain finite intensities")
         scale = _get_voxel_scale(loader)
-        if fl_channel is not None and fl_channel not in loader.fl_data:
-            raise ValueError(f"Fluorescence channel {fl_channel!r} is unavailable at timepoint {timepoint}")
         channels = [fl_channel] if fl_channel is not None else list(loader.fl_data)
         translation_um = (0.0, 0.0, 0.0)
         if registration_path is not None:
@@ -1218,9 +1214,9 @@ def view_3d(
     try:
         geometry = _add_volume_layers(viewer, ht_data, scale, registrations, rendering, metadata)
         constrain_native_slicing(viewer)
-        viewer.scale_bar.visible = True
-        viewer.scale_bar.unit = "µm"
-        viewer.scale_bar.font_size = 14
+        viewer.canvas.overlays.scale_bar.visible = True
+        viewer.canvas.overlays.scale_bar.unit = "µm"
+        viewer.canvas.overlays.scale_bar.font_size = 14
         viewer.dims.axis_labels = ("Z (µm)", "Y (µm)", "X (µm)")
 
         viewer.window._qt_viewer.dockLayerList.setVisible(False)
@@ -1247,8 +1243,8 @@ def view_3d(
         if show_slices:
             viewer.dims.set_point(0, (ht_data.shape[0] - 1) * scale[0] / 2)
         else:
-            viewer.camera.angles = (0, -30, 45)
-            viewer.reset_view()
+            viewer.scene.camera.angles = (0, -30, 45)
+            viewer.fit_to_view()
         if screenshot is not None:
             from qtpy.QtWidgets import QApplication
             QApplication.processEvents()

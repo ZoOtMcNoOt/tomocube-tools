@@ -16,6 +16,12 @@ from tomocube.viewer.volume_geometry import (
 )
 
 
+# Only the optional napari dependency's known pydantic deprecation is exempt.
+pytestmark = pytest.mark.filterwarnings(
+    "ignore:`json_encoders` is deprecated.*:DeprecationWarning:pydantic\\._internal\\._generate_schema"
+)
+
+
 class Layer:
     def __init__(self, data, **kwargs):
         self.data = data
@@ -50,8 +56,8 @@ class Viewer:
     def __init__(self, **kwargs):
         self.layers = []
         self.dims = Dims()
-        self.camera = SimpleNamespace(angles=(10, 20, 30), zoom=1, center=(0, 0, 0))
-        self.scale_bar = SimpleNamespace()
+        self.scene = SimpleNamespace(camera=SimpleNamespace(angles=(10, 20, 30), zoom=1, center=(0, 0, 0)))
+        self.canvas = SimpleNamespace(overlays=SimpleNamespace(scale_bar=SimpleNamespace()))
         dock = SimpleNamespace(setVisible=lambda visible: None)
         self.window = SimpleNamespace(
             _qt_viewer=SimpleNamespace(dockLayerList=dock, dockLayerControls=dock),
@@ -65,7 +71,7 @@ class Viewer:
         self.layers.append(layer)
         return layer
 
-    def reset_view(self):
+    def fit_to_view(self):
         pass
 
     def close(self):
@@ -263,8 +269,23 @@ def test_timepoint_channel_selection_and_world_slice_center(make_tcf, fake_gui):
 def test_missing_channel_rejected_before_optional_gui(make_tcf, monkeypatch):
     path = make_tcf(fluorescence=True)
     monkeypatch.setitem(sys.modules, "napari", None)
-    with pytest.raises(ValueError, match="unavailable"):
+    with pytest.raises(ValueError, match="Unknown fluorescence channel"):
         viewer_3d.view_3d(path, fl_channel="CH9")
+
+
+def test_explicit_channel_does_not_read_unselected_fluorescence(make_tcf, fake_gui, monkeypatch):
+    path = make_tcf(fluorescence=True)
+    reads = []
+    original = h5py.Dataset.__array__
+
+    def record(dataset, *args, **kwargs):
+        reads.append(dataset.name)
+        return original(dataset, *args, **kwargs)
+
+    monkeypatch.setattr(h5py.Dataset, "__array__", record)
+    viewer_3d.view_3d(path, fl_channel="CH1")
+    assert "/Data/3DFL/CH1/000000" in reads
+    assert not any("/Data/3DFL/CH0/" in name for name in reads)
 
 
 def test_failed_gui_setup_closes_viewer_and_loader(make_tcf, fake_gui, monkeypatch):
@@ -339,6 +360,32 @@ def test_screenshot_failure_preserves_previous_file_and_closes_viewer(make_tcf, 
     assert not list(tmp_path.glob(".view-*"))
 
 
+def test_screenshot_and_animation_cannot_overwrite_alignment_report(make_tcf, fake_gui, tmp_path):
+    from tomocube.processing.alignment import AlignmentResult, save_alignment
+
+    path = make_tcf(fluorescence=True)
+    result = AlignmentResult(True, "accepted", (0, 0, 0), 0.9, 0.95, 0.3, 0.9,
+                             "start", (1, 1, 1), (5, 5, 5), 0.6, 0.03, 0.5)
+    # The sidecar format is JSON even when a caller supplied a media suffix.
+    report = tmp_path / "alignment.gif"
+    with TCFFileLoader(path) as loader:
+        loader.load_timepoint(0)
+        save_alignment(loader, "CH1", result, report)
+    original = report.read_bytes()
+    with pytest.raises(ValueError, match="overwrite input"):
+        viewer_3d.view_3d(path, fl_channel="CH1", registration_path=report, screenshot=report)
+    viewer = fake_gui[0][0]
+    assert report.read_bytes() == original
+    assert viewer.closed == 1
+    exporter = viewer_3d.AnimationExporter(viewer, tmp_path)
+    exporter.start_turntable_export(report.name, 1, 100)
+    exporter.capture_turntable_frame()
+    with pytest.raises(ValueError, match="overwrite input"):
+        exporter.finish_export()
+    assert report.read_bytes() == original
+    assert not exporter._is_exporting
+
+
 @pytest.mark.parametrize("axis,expected", [(0, [-1, 1, 3]), (1, [0]), (2, np.arange(9) * 0.25)])
 def test_animation_sweeps_world_positions_through_last_sample(axis, expected, tmp_path, fake_gui):
     viewer = Viewer()
@@ -382,7 +429,7 @@ def test_turntable_gif_retains_canvas_and_millisecond_timing(tmp_path, fake_gui)
         for frame in range(gif.n_frames):
             gif.seek(frame)
             assert gif.info["duration"] == 150
-    assert viewer.camera.angles == (10, 20, 30)
+    assert viewer.scene.camera.angles == (10, 20, 30)
     assert viewer.dims.ndisplay == 2
     assert not exporter._frames
     assert not exporter._is_exporting
@@ -405,7 +452,7 @@ def test_failed_animation_encoding_restores_view_and_preserves_output(tmp_path, 
     with pytest.raises(RuntimeError, match="encoder failed"):
         exporter.finish_export()
     assert output.read_bytes() == b"previous animation"
-    assert viewer.camera.angles == (10, 20, 30)
+    assert viewer.scene.camera.angles == (10, 20, 30)
     assert viewer.dims.ndisplay == 2
     assert not exporter._is_exporting
 
