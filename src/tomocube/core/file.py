@@ -469,6 +469,8 @@ class TCFFileLoader:
         if np.any(fl > 0):
             vmin = float(np.percentile(fl[fl > 0], 5))
             vmax = float(np.percentile(fl[fl > 0], 99))
+            if vmin == vmax:
+                return (0.0, vmax)
             return (vmin, vmax)
         return (0.0, 1.0)
 

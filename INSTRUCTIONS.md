@@ -37,9 +37,9 @@ Help/version entry points:
 - `python -m tomocube help`
 - `python -m tomocube --help`
 - `python -m tomocube --version`
-- `python -m tomocube tiff --help` (also `mat --help` and `gif --help`)
+- `python -m tomocube <command> --help` for `view`, `slice`, `tiff`, `mat`, and `gif`
 
-For `tiff`, `mat`, and `gif`, `--timepoint N` selects a zero-based index into the available HT acquisitions. Numeric keys sort numerically (`0`, `1`, `2`, `10`); the default index is `0`. Missing or invalid option values are reported before exports begin. Out-of-range indices produce an error without creating an output file.
+For `view`, `slice`, `tiff`, `mat`, and `gif`, `--timepoint N` selects a zero-based index into the available HT acquisitions. Numeric keys sort numerically (`0`, `1`, `2`, `10`); the default index is `0`. Missing or invalid option values are reported before loading data. Out-of-range indices produce an error without creating an output file.
 
 ## Commands
 
@@ -64,24 +64,24 @@ Includes:
 Orthogonal 2D HT viewer with optional FL overlays and measurement tools.
 
 ```bash
-python -m tomocube view path/to/file.TCF [--z-offset-mode start|center|auto]
+python -m tomocube view path/to/file.TCF [--timepoint N] [--fl CHANNEL] [--z-offset-mode start|center|auto]
 ```
 
 Default `z-offset-mode` for `view`: `start`.
 
-If no path is provided, the legacy viewer fallback path selection logic is used.
+A file path is required. The default FL channel is the first available at the selected timepoint. Press `F` to show fluorescence or `N` to show the next channel. The timepoint slider preserves the chosen channel; missing fluorescence is marked unavailable, and failed loads preserve the preceding display.
 
 ### `slice`
 
 Side-by-side HT / FL / overlay slice viewer.
 
 ```bash
-python -m tomocube slice path/to/file.TCF [--z-offset-mode start|center|auto]
+python -m tomocube slice path/to/file.TCF [--timepoint N] [--fl CHANNEL] [--z-offset-mode start|center|auto]
 ```
 
 Default `z-offset-mode` for `slice`: `start`.
 
-If no path is provided, fallback file discovery logic is used.
+A file path is required. This viewer opens one selected timepoint. The default FL channel is the first available; an explicitly requested channel must exist at that timepoint. HT-only acquisitions use a single panel.
 
 ### `view3d`
 
@@ -176,9 +176,11 @@ Notes:
 
 `z-offset-mode` meanings:
 
-- `start`: file `OffsetZ` is FL slice-0 start in HT space.
-- `center`: file `OffsetZ` is FL center in HT space.
-- `auto`: alignment heuristic.
+- `start`: the channel's `OffsetZ` places the first FL voxel center in HT space.
+- `center`: the channel's `OffsetZ` places the FL geometric center in HT space.
+- `auto`: 2D viewers and registration/overlay exports align the intensity-weighted FL Z center to the geometric HT center, with geometric fallback for zero signal. The separate 3D viewer uses geometric centering.
+
+For 2D viewers and registration, centers are at `index × spacing`; image edges extend half a voxel past the centers. Independent XYZ spacings and physical XY rotation/translation are applied by a shared linear sampler. Positive manual FL Z adjustments move the display toward larger HT Z without altering source data or exported calibration. See [Registration Behavior](README.md#registration-behavior) for the coordinate convention and changes from earlier output.
 
 Defaults by path:
 
@@ -196,13 +198,14 @@ Defaults by path:
 
 Keys:
 
-- Arrow keys: move active slider.
+- Arrow keys: move a position slider by one sample, or a continuous slider by 2%.
 - `Home` / `End`: min/max active slider.
 - `A`: auto contrast (slice).
 - `G`: global contrast.
 - `R`: reset view.
 - `I`: invert colormap.
 - `F`: toggle FL overlay.
+- `N`: show the next fluorescence channel with its channel-specific offset.
 - `D`: distance measurement.
 - `P`: area/polygon measurement.
 - `C`: clear measurements.

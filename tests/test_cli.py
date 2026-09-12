@@ -24,10 +24,50 @@ def cli(monkeypatch):
     return run
 
 
-@pytest.mark.parametrize("command", ["tiff", "mat", "gif"])
+@pytest.mark.parametrize("command", ["tiff", "mat", "gif", "view", "slice"])
 def test_export_command_help(cli, capsys, command):
     assert cli(command, "--help") == 0
     assert "--timepoint" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("command", ["view", "slice"])
+@pytest.mark.parametrize("options", [["--bogus"], ["--fl"], ["--timepoint", "-1"],
+                                    ["--z-offset-mode", "guess"], ["--timepoint", "1.5"]])
+def test_viewer_rejects_invalid_arguments_before_loading(cli, capsys, command, options):
+    assert cli(command, "nonexistent.TCF", *options) == 2
+    assert "error:" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("command,class_name", [("view", "TCFViewer"), ("slice", "SliceViewer")])
+def test_cli_passes_viewer_selection(cli, monkeypatch, command, class_name):
+    import tomocube.viewer
+
+    received = {}
+
+    class Viewer:
+        def __init__(self, path, **kwargs):
+            received.update(path=path, **kwargs)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            received["closed"] = True
+
+        def show(self):
+            received["shown"] = True
+
+    monkeypatch.setattr(tomocube.viewer, class_name, Viewer)
+    assert cli(command, "--timepoint", "2", "sample file.TCF", "--fl", "CH1",
+               "--z-offset-mode", "center") == 0
+    assert received == {"path": "sample file.TCF", "timepoint": 2, "fl_channel": "CH1",
+                        "z_offset_mode": "center", "shown": True, "closed": True}
+
+
+@pytest.mark.parametrize("command", ["view", "slice"])
+def test_cli_reports_invalid_viewer_selection_without_traceback(cli, make_tcf, capsys, command):
+    assert cli(command, make_tcf(), "--timepoint", "100") == 1
+    assert "Traceback" not in capsys.readouterr().err
 
 
 @pytest.mark.parametrize("command,options", [

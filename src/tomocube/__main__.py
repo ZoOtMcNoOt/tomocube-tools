@@ -601,10 +601,11 @@ def _print_help() -> None:
     print()
 
     # Keyboard shortcuts in a styled grid
-    print(f"  {s.BOLD}Export selection{s.RESET}")
-    print(f"    {s.CYAN}--timepoint N{s.RESET}  Zero-based acquisition index for tiff, mat, and gif")
+    print(f"  {s.BOLD}Acquisition selection{s.RESET}")
+    print(f"    {s.CYAN}--timepoint N{s.RESET}  Zero-based acquisition index for view, slice, tiff, mat, and gif")
+    print(f"    {s.CYAN}view/slice --fl CH1{s.RESET}  Select a fluorescence channel in either 2D viewer")
     print(f"    {s.CYAN}gif --fl CH1{s.RESET}   Select a fluorescence channel; add --overlay to blend with HT")
-    print(f"    Use {s.CYAN}<command> --help{s.RESET} for validated export options and defaults.")
+    print(f"    Use {s.CYAN}<command> --help{s.RESET} for viewer/export options and defaults.")
     print()
 
     print(f"  {s.BRIGHT_WHITE}{s.BOLD}VIEWER SHORTCUTS{s.RESET}")
@@ -963,45 +964,8 @@ def main() -> int:
     # For simple commands that just need a file path (no options)
     file_path = args_list[0] if args_list else ""
 
-    if command == "view":
-        from tomocube.viewer import TCFViewer
-
-        if not file_path:
-            from tomocube.viewer.tcf_viewer import main as viewer_main
-
-            viewer_main()
-            return 0
-        
-        # Parse z-offset-mode if provided
-        z_offset_mode = "start"
-        for i, arg in enumerate(args_list):
-            if arg == "--z-offset-mode" and i + 1 < len(args_list):
-                z_offset_mode = args_list[i + 1]
-                break
-        
-        with TCFViewer(file_path, z_offset_mode=z_offset_mode) as viewer:
-            viewer.show()
-        return 0
-
-    elif command == "slice":
-        from tomocube.viewer import SliceViewer
-
-        if not file_path:
-            from tomocube.viewer.slice_viewer import main as slice_main
-
-            slice_main()
-            return 0
-        
-        # Parse z-offset-mode if provided
-        z_offset_mode = "start"
-        for i, arg in enumerate(args_list):
-            if arg == "--z-offset-mode" and i + 1 < len(args_list):
-                z_offset_mode = args_list[i + 1]
-                break
-        
-        viewer = SliceViewer(file_path, z_offset_mode=z_offset_mode)
-        viewer.show()
-        return 0
+    if command in ("view", "slice"):
+        return _view_2d(command, args_list)
 
     elif command == "info":
         if not file_path:
@@ -1072,6 +1036,33 @@ def _timepoint_index(value: str) -> int:
     if index < 0:
         raise argparse.ArgumentTypeError("timepoint must be a non-negative integer")
     return index
+
+
+def _view_2d(command: str, args: list[str]) -> int:
+    """Validate viewer selection before opening the acquisition or GUI."""
+    parser = argparse.ArgumentParser(prog=f"python -m tomocube {command}", allow_abbrev=False)
+    parser.add_argument("file", metavar="file.TCF")
+    parser.add_argument("--timepoint", type=_timepoint_index, default=0, metavar="N",
+                        help="zero-based acquisition index in numeric key order")
+    parser.add_argument("--fl", metavar="CHANNEL", help="fluorescence channel (default: first available)")
+    parser.add_argument("--z-offset-mode", choices=("start", "center", "auto"), default="start")
+    try:
+        options = parser.parse_intermixed_args(args)
+    except SystemExit as error:
+        return int(error.code or 0)
+
+    from tomocube.core.exceptions import TCFError
+    from tomocube.viewer import TCFViewer, SliceViewer
+
+    viewer_type = TCFViewer if command == "view" else SliceViewer
+    try:
+        with viewer_type(options.file, z_offset_mode=options.z_offset_mode,
+                         timepoint=options.timepoint, fl_channel=options.fl) as viewer:
+            viewer.show()
+    except (TCFError, OSError, ValueError, IndexError) as error:
+        _print_error(str(error))
+        return 1
+    return 0
 
 
 def _frame_rate(value: str) -> int:

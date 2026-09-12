@@ -12,7 +12,7 @@ Python library and CLI for working with Tomocube TCF (Tomocube Cell File) holoto
 - Render 3D volumes in napari (`view3d`) with camera presets, crop controls, layer controls, histogram, FL Z-offset slider, and animation export widgets.
 - Register fluorescence (FL) into HT space (`start`, `center`, `auto` modes).
 - Export to TIFF, MATLAB `.mat`, PNG sequence (API), and GIF.
-- Select acquisition timepoints for TIFF, MAT, and GIF exports, and choose fluorescence channels for GIFs.
+- Select acquisition timepoints and fluorescence channels in 2D viewers and exports.
 - Preserve independent X/Y/Z calibration and source/timepoint metadata in scientific TIFF and MAT exports.
 
 ## Installation
@@ -40,6 +40,9 @@ python -m tomocube info path/to/file.TCF
 
 # Interactive orthogonal viewer
 python -m tomocube view path/to/file.TCF
+
+# Compare the third acquisition and fluorescence channel CH1
+tomocube slice path/to/file.TCF --timepoint 2 --fl CH1
 
 # 3D viewer (requires [3d] extras)
 python -m tomocube view3d path/to/file.TCF
@@ -73,13 +76,13 @@ Global flag:
 - `-V`, `--verbose`: prints detailed registration diagnostics.
 
 Key option notes:
-- `view` and `slice`: `--z-offset-mode` default is `start`.
+- `view` and `slice`: `--z-offset-mode` defaults to `start`; `--fl CH1` selects a channel (default: first available). A file path is required. In `view`, press `F` to show the overlay.
 - `gif --overlay`: `--z-offset-mode` default is `start`.
 - `view3d`: `--z-offset-mode` default is `auto`.
 - `tiff`: CLI default is `--32bit` with physical RI values; `--16bit` requires `--normalize`.
-- `tiff`, `mat`, and `gif`: `--timepoint N` selects a zero-based acquisition index (default `0`). Numeric acquisition keys are sorted numerically, so `2` precedes `10`.
+- `view`, `slice`, `tiff`, `mat`, and `gif`: `--timepoint N` selects a zero-based acquisition index (default `0`). Numeric acquisition keys are sorted numerically, so `2` precedes `10`.
 - `gif`: `--fl CH1` selects a fluorescence channel; combine with `--overlay` to blend it with HT. `--fps` accepts integers from 1 to 100; GIF timing is rounded to 10 ms intervals.
-- Invalid export options are rejected before creating output files. Use `tomocube tiff --help`, `tomocube mat --help`, or `tomocube gif --help` for command-specific usage.
+- Invalid 2D viewer and export options are rejected before loading data. Use `tomocube <command> --help` for command-specific usage.
 
 Run `python -m tomocube help` for full CLI help text.
 
@@ -87,9 +90,17 @@ Run `python -m tomocube help` for full CLI help text.
 
 `z-offset-mode` controls FL Z placement:
 
-- `start`: file `OffsetZ` is treated as where FL slice 0 starts in HT coordinates.
-- `center`: file `OffsetZ` is treated as FL volume center in HT coordinates.
-- `auto`: FL is centered in HT Z range (3D viewer), or FL signal center is aligned to HT center for `register_fl_to_ht`.
+- `start`: the selected channel's `OffsetZ` places the center of FL slice 0 in HT coordinates.
+- `center`: the channel's `OffsetZ` places the geometric center of the FL volume in HT coordinates.
+- `auto`: in 2D viewers and registration/export, the FL intensity-weighted Z center aligns with the HT geometric center, ignoring `OffsetZ`. Weights are nonnegative per-plane intensity sums; a volume without positive signal uses its geometric center. The separate 3D viewer uses geometric centering.
+
+The 2D viewers and `register_fl_to_ht` share one physical-coordinate transform. Voxel centers are at `index × spacing`, so each axis's geometric center is `(size - 1) × spacing / 2`; displayed image edges extend half a voxel beyond the first and last centers. Independent X/Y spacings are respected. In YX coordinate order, forward rotation is `[[cos, -sin], [sin, cos]]`, followed by translation in HT micrometers. Resolution metadata determines scaling; the legacy `Scale` attribute is not applied again.
+
+Fluorescence is sampled linearly on the HT grid, including the last plane and single-plane volumes. Positions outside the FL sample centers are zero. The viewer samples only visible planes and retains the original intensities; its manual FL Z adjustment changes display alignment only. Registration rejects nonfinite intensities and invalid calibration rather than producing misleading coordinates.
+
+These corrections change aligned output compared with earlier versions, which inverted XY spacing ratios, omitted the last FL plane, and used a different overlay mapping. The napari 3D viewer has its own native-volume placement and is not covered by the 2D/export agreement described here.
+
+The orthogonal viewer updates shapes, physical extents, contrast controls, and overlays when the timepoint changes. Press `N` or click **Channel** to show the next fluorescence channel with its own calibration. Missing fluorescence is marked unavailable, and a failed acquisition load preserves the previously displayed data. Arrow keys move a focused position slider by one sample. Navigation controls are hidden for axes containing a single sample.
 
 Defaults by entry point:
 
@@ -146,7 +157,7 @@ python -m pytest -q
 python -m build
 ```
 
-The regression suite creates small synthetic TCF acquisitions and reads exported TIFF, MAT, GIF, and PNG files back to verify values, calibration, frame dimensions, timepoint selection, metadata handling, and error behavior. It requires no experimental data or GUI extras. CI runs on Linux with Python 3.10 and 3.14 and Windows with Python 3.12, then builds and installs the wheel.
+The regression suite creates synthetic TCF acquisitions and reads exported TIFF, MAT, GIF, and PNG files back to verify values, calibration, selection, metadata, and error behavior. Analytic fiducials cover anisotropic scaling, physical rotation/translation, channel offsets, and boundary planes. Matplotlib runs with the Agg backend to test rendered figures, keyboard/mouse callbacks, acquisition changes, and resource cleanup. These tests require no experimental data or GUI extras. CI runs on Linux with Python 3.10 and 3.14 and Windows with Python 3.12, then builds and installs the wheel.
 
 Interactive viewer behavior and instrument-specific registration should also be checked with representative acquisitions before research use; the synthetic suite does not establish registration accuracy on experimental data.
 
