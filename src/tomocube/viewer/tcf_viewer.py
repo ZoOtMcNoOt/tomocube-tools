@@ -92,7 +92,7 @@ class TCFViewer:
     DARK_FG = "#2d2d2d"
 
     def __init__(self, tcf_path: str, z_offset_mode: str = "start", *,
-                 timepoint: int = 0, fl_channel: str | None = None):
+                 timepoint: int = 0, fl_channel: str | None = None, registration_path=None):
         """Initialize the TCF viewer.
         
         Args:
@@ -105,6 +105,9 @@ class TCFViewer:
         if z_offset_mode not in Z_OFFSET_MODES:
             raise ValueError(f"z_offset_mode must be one of {Z_OFFSET_MODES}")
         self.z_offset_mode = z_offset_mode
+        if registration_path is not None and fl_channel is None:
+            raise ValueError("A saved registration requires an explicit fluorescence channel")
+        self.registration_path = registration_path
         self._initial_timepoint = timepoint
         self._requested_channel = fl_channel
 
@@ -192,10 +195,15 @@ class TCFViewer:
         self._auto_contrast_global()
 
     def _prepare_fl_mapper(self, loader: TCFFileLoader, channel: str | None):
+        mode, translation = self.z_offset_mode, (0, 0, 0)
+        if self.registration_path is not None:
+            from tomocube.processing.alignment import load_alignment
+            alignment = load_alignment(self.registration_path, loader, channel)
+            mode, translation = alignment.z_offset_mode, alignment.translation_um
         if channel in loader.fl_data:
             mapper = FluorescenceMapper(
                 loader.fl_data[channel], loader.data_3d.shape,
-                loader.reg_params, channel, self.z_offset_mode,
+                loader.reg_params, channel, mode, translation_um=translation,
             )
             return mapper, *loader.get_fl_contrast(channel)
         return None, 0, 1

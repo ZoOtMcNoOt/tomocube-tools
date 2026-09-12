@@ -1,171 +1,143 @@
 # Tomocube Tools
 
-[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+Python library and CLI for inspecting, viewing, measuring and exporting Tomocube TCF holotomography acquisitions. Arrays use **ZYX** order; physical coordinates and spacing use micrometers.
 
-Python library and CLI for working with Tomocube TCF (Tomocube Cell File) holotomography data.
-
-## Features
-
-- Inspect TCF metadata (`info`) including dimensions, resolutions, instrument, and sidecar metadata when present.
-- Explore HT data in interactive orthogonal viewers (`view` and `slice`) with physical units.
-- Render 3D volumes in napari (`view3d`) with camera presets, crop controls, layer controls, histogram, FL Z-offset slider, and animation export widgets.
-- Register fluorescence (FL) into HT space (`start`, `center`, `auto` modes).
-- Export to TIFF, MATLAB `.mat`, PNG sequence (API), and GIF.
-- Select acquisition timepoints and fluorescence channels in 2D viewers and exports.
-- Preserve independent X/Y/Z calibration and source/timepoint metadata in scientific TIFF and MAT exports.
-
-## Installation
+## Install
 
 ```bash
-# From a local clone
 pip install -e .
-
-# With 3D viewer extras (napari + animation tooling)
-pip install -e ".[3d]"
-
-# All extras
-pip install -e ".[all]"
+pip install -e ".[3d]"   # optional napari viewer and animation tools
+pip install -e ".[dev]"  # regression tests and package builds
 ```
 
-Core package requirements come from `pyproject.toml` and include: `h5py`, `numpy`, `scipy`, `matplotlib`, `tifffile`, `imageio`, and `imagecodecs`.
+Both `tomocube` and `python -m tomocube` run the same command tree. The core package requires Python 3.10+; the 3D extra requires Python 3.11+ and uses napari 0.9.1+ with PyQt6.
 
-Installation also provides the `tomocube` command, equivalent to `python -m tomocube`.
-
-## Quick Start
+## Inspect, measure, align, export
 
 ```bash
-# Show file metadata
-python -m tomocube info path/to/file.TCF
+# Header inventory: every acquisition, channel, shape, dtype and calibration
+# No volume pixels are loaded by info.
+tomocube info sample.TCF --json
 
-# Interactive orthogonal viewer
-python -m tomocube view path/to/file.TCF
+# Analyze every acquisition in two files, using bounded Z blocks
+tomocube analyze first.TCF second.TCF --all-timepoints --channel HT --channel CH1 --output measurements.json
 
-# Compare the third acquisition and fluorescence channel CH1
-tomocube slice path/to/file.TCF --timepoint 2 --fl CH1
+# Measure an explicit native-voxel region; threshold is inclusive, in RI units
+tomocube analyze sample.TCF --roi 0 20 50 150 40 140 --threshold 1.36 --format csv --output roi.csv
 
-# 3D viewer (requires [3d] extras)
-python -m tomocube view3d path/to/file.TCF
+# Estimate residual FL translation from shared image structures
+# Z, Y and X bounds are in micrometers. A rejected result exits with code 1.
+tomocube register sample.TCF alignment.json --fl CH1 --max-shift 8 5 5
 
-# Export HT volume as 32-bit TIFF preserving physical RI values
-python -m tomocube tiff path/to/file.TCF output.tiff --32bit
+# Inspect an accepted estimate, then reuse precisely that acquisition/channel
+tomocube slice sample.TCF --fl CH1 --registration alignment.json
+tomocube view3d sample.TCF --fl CH1 --registration alignment.json
+tomocube tiff sample.TCF aligned.tiff --fl CH1 --registration alignment.json
+tomocube mat sample.TCF aligned.mat --fl CH1 --registration alignment.json
+tomocube gif sample.TCF overlay.gif --overlay --fl CH1 --registration alignment.json
 
-# Export the third acquisition (zero-based index)
-tomocube tiff path/to/file.TCF timepoint2.tiff --timepoint 2
-
-# Export HT+FL overlay GIF
-python -m tomocube gif path/to/file.TCF overlay.gif --overlay --z-offset-mode center
-
-# Choose a fluorescence channel for the overlay
-tomocube gif path/to/file.TCF channel1.gif --overlay --fl CH1
+# Use metadata placement directly, or export original values
+tomocube tiff sample.TCF metadata-aligned.tiff --fl CH1 --registered --z-offset-mode start
+tomocube tiff sample.TCF native-ri.tiff
+tomocube png sample.TCF new-slice-folder --timepoint 2
 ```
 
-## CLI Commands
+`--timepoint N` selects a zero-based acquisition index in numeric key order (`2` before `10`). All viewers and exporters support it. `analyze` defaults to index 0; `--all-timepoints` selects the whole acquisition series. A missing FL acquisition is an explicit report row with null statistics; unknown channels and invalid selections fail.
 
-| Command | Purpose |
+## What the tools do
+
+| Command | Capability |
 |---|---|
-| `info` | Show metadata for one TCF file |
-| `view` | 2D orthogonal HT viewer with optional FL overlay and measurements |
-| `slice` | Side-by-side HT / FL / overlay slice viewer |
-| `view3d` | 3D napari viewer |
-| `tiff` | Export TIFF stack |
-| `mat` | Export MATLAB `.mat` |
-| `gif` | Export animated GIF (HT only or HT+FL overlay) |
+| `info` | Header-only inventory, missing/orphan fluorescence keys, calibration provenance, optics and related sidecar metadata; JSON output |
+| `analyze` | Batch and timepoint-series statistics for native HT/FL, strict ROI bounds, calibrated volume and threshold-selected volume; JSON/CSV |
+| `register` | Bounded image-based translation, objective diagnostics, ambiguity/failure handling and a replayable source-bound JSON report |
+| `view` | Orthogonal 2D navigation, channel/timepoint switching, contrast, overlays, physical distance/area tools |
+| `slice` | Side-by-side HT, fluorescence and overlay planes |
+| `view3d` | Native napari volume placement, calibrated clipping, camera/layer controls and animation |
+| `tiff` | Native or registered scientific stacks with XYZ calibration and provenance |
+| `mat` | Physical RI, native FL and optional separately named registered FL, plus calibration and transform metadata |
+| `gif` / `png` | Native or registered display images and overlay animations |
 
-Global flag:
-- `-V`, `--verbose`: prints detailed registration diagnostics.
+Run `tomocube <command> --help` for options. Invalid arguments return 2; data/runtime failures and rejected alignments return 1; success returns 0. Machine-readable output goes to stdout; diagnostic messages go to stderr.
 
-Key option notes:
-- `view` and `slice`: `--z-offset-mode` defaults to `start`; `--fl CH1` selects a channel (default: first available). A file path is required. In `view`, press `F` to show the overlay.
-- `gif --overlay`: `--z-offset-mode` default is `start`.
-- `view3d`: `--z-offset-mode` default is `auto`.
-- `tiff`: CLI default is `--32bit` with physical RI values; `--16bit` requires `--normalize`.
-- `view`, `slice`, `tiff`, `mat`, and `gif`: `--timepoint N` selects a zero-based acquisition index (default `0`). Numeric acquisition keys are sorted numerically, so `2` precedes `10`.
-- `gif`: `--fl CH1` selects a fluorescence channel; combine with `--overlay` to blend it with HT. `--fps` accepts integers from 1 to 100; GIF timing is rounded to 10 ms intervals.
-- Invalid 2D viewer and export options are rejected before loading data. Use `tomocube <command> --help` for command-specific usage.
+## Registration contract
 
-Run `python -m tomocube help` for full CLI help text.
+A single `FluorescenceRegistration` maps native FL voxel centers to HT coordinates for all viewers and scientific exports. Centers lie at `index * spacing`; geometric centers use `(size - 1) / 2`. Independent XYZ spacings determine scale. Forward physical XY rotation in YX order is `[[cos, -sin], [sin, cos]]`, followed by translation in HT micrometers. The legacy `Scale` attribute is not applied a second time. Each channel retains its own `OffsetZ`.
 
-## Registration Behavior
+The initial Z placement modes are:
 
-`z-offset-mode` controls FL Z placement:
+- `start`: `OffsetZ` places the first FL voxel center in HT coordinates.
+- `center`: `OffsetZ` places the FL geometric center in HT coordinates.
+- `auto`: the nonnegative plane-sum weighted FL Z center is placed at the HT geometric center, with geometric fallback when there is no positive signal. **This is centering, not image matching.**
 
-- `start`: the selected channel's `OffsetZ` places the center of FL slice 0 in HT coordinates.
-- `center`: the channel's `OffsetZ` places the geometric center of the FL volume in HT coordinates.
-- `auto`: in 2D viewers and registration/export, the FL intensity-weighted Z center aligns with the HT geometric center, ignoring `OffsetZ`. Weights are nonnegative per-plane intensity sums; a volume without positive signal uses its geometric center. The separate 3D viewer uses geometric centering.
+Defaults are `start` for APIs, 2D viewers and overlay exports, and `auto` for the 3D viewer. Napari now uses the same intensity centering as the other entry points. Native napari layers use the shared forward affine; 2D/export samplers interpolate linearly on the HT grid, including final and singleton planes. Samples outside native voxel centers are zero. A manual viewer Z shift changes display placement only.
 
-The 2D viewers and `register_fl_to_ht` share one physical-coordinate transform. Voxel centers are at `index × spacing`, so each axis's geometric center is `(size - 1) × spacing / 2`; displayed image edges extend half a voxel beyond the first and last centers. Independent X/Y spacings are respected. In YX coordinate order, forward rotation is `[[cos, -sin], [sin, cos]]`, followed by translation in HT micrometers. Resolution metadata determines scaling; the legacy `Scale` attribute is not applied again.
+### Image-based translation
 
-Fluorescence is sampled linearly on the HT grid, including the last plane and single-plane volumes. Positions outside the FL sample centers are zero. The viewer samples only visible planes and retains the original intensities; its manual FL Z adjustment changes display alignment only. Registration rejects nonfinite intensities and invalid calibration rather than producing misleading coordinates.
+`register` applies a bounded residual ZYX translation after the chosen initial metadata placement. It uses overlap-normalized positive-intensity correlation, a regular coarse search with native FL support extending across the whole shift range, and bounded refinement against original FL samples. It estimates **translation only**. It does not estimate rotation, scale, deformation or arbitrary correspondence between different structures.
 
-These corrections change aligned output compared with earlier versions, which inverted XY spacing ratios, omitted the last FL plane, and used a different overlay mapping. The napari 3D viewer has its own native-volume placement and is not covered by the 2D/export agreement described here.
+HT and FL can depict different biology. An accepted score is evidence for this objective, not a probability that the biological correspondence is correct. Constant volumes, insufficient 3D extent, weak correlations, ambiguous peaks, unsupported overlap and solutions at the search boundary are rejected. Each axis must distinguish the estimate from its physical search boundaries. Periodic and invariant-direction regressions check false acceptance.
 
-The orthogonal viewer updates shapes, physical extents, contrast controls, and overlays when the timepoint changes. Press `N` or click **Channel** to show the next fluorescence channel with its own calibration. Missing fluorescence is marked unavailable, and a failed acquisition load preserves the previously displayed data. Arrow keys move a focused position slider by one sample. Navigation controls are hidden for axes containing a single sample.
+The coarse grid defaults to at most 64 samples per reference axis and bounds its search halo by adjusting spacing. Fine texture can become unresolvable on that grid; a rejected estimate may require a smaller physical search or a larger `--max-dimension` (8-128). A broad search over a small acquisition can also leave too few samples. Inspect the recorded grid spacing and diagnostics. Higher grid limits increase memory and computation. Initial overlap is required; choose an appropriate initial mode before estimating a correction.
 
-Defaults by entry point:
+Reports contain the candidate translation, before/after correlation, competing-peak margin, overlap, search settings, full affine, original calibration and SHA-256 fingerprints of loaded HT/FL arrays. Rejected reports are saved for inspection but cannot be applied. Existing reports require `--overwrite` to replace. Replay checks the filename, acquisition key, channel, shapes, pixels and calibration. A report for another acquisition or channel fails, including during a 2D viewer timepoint change; the existing display is retained.
 
-| Entry point | Default |
-|---|---|
-| `python -m tomocube view` | `start` |
-| `python -m tomocube slice` | `start` |
-| `python -m tomocube gif --overlay` | `start` |
-| `python -m tomocube view3d` | `auto` |
-| `register_fl_to_ht(...)` | `start` |
+Algorithm building blocks: [SciPy correlation](https://docs.scipy.org/doc/scipy/reference/generated/scipy.signal.correlate.html) and [bounded optimization](https://docs.scipy.org/doc/scipy/reference/generated/scipy.optimize.minimize.html). See the regression tests for analytic fiducials and independent crop/ambiguity cases.
+
+## Quantitative analysis and resource use
+
+Analysis reads Z slabs from HDF5 and never populates the eager viewer cache. `--block-depth` controls slab depth. Memory still scales with the selected XY plane area; it is not an arbitrary byte-budget guarantee. Each channel uses its own native grid. The same integer ROI applied to HT and FL does **not** select the same physical region when their calibration differs.
+
+Reports include source, acquisition, channel, native shape/dtype, XYZ spacing and its metadata/default provenance, ROI, RI scale divisor, population count/mean/std/min/max, physical sampled volume, intensity-times-volume integral and units. `--threshold` adds inclusive selected-voxel counts and physical volume. These are descriptive measurements; thresholding is not cell segmentation, and an RI integral is not dry mass.
+
+RI scaling is decided once per full dataset, even for ROI/block reads. Integer HT uses the TCF divisor of 10000. Floating HT uses a bounded full-dataset scan to distinguish physical from scaled storage. FL retains native values. Invalid calibration and nonfinite selected intensities are rejected. Failed eager loads preserve the preceding acquisition. `load_timepoint(..., fl_channels=[])` avoids loading fluorescence; a list loads only those channels.
+
+2D viewers cache at most one FL plane per axis. Napari retains native FL integer arrays and clips for display without copying/cropping source volumes. Overlay GIF sampling also avoids a registered 3D intermediate. Scientific TIFF/MAT export and non-overlay display registration currently materialize a single selected volume; GIF encoders may buffer frames.
+
+## Export integrity and changes in 1.1
+
+- TIFF API and CLI now both default to unnormalized float32. Request `bit_depth=16, normalize=True` or `--16bit --normalize` for display output. Floating output preserves values representable in float32; it does not promise exact conversion of every 64-bit integer.
+- TIFF ImageJ `Info` is structured JSON. Registered TIFF uses HT spacing and records the native calibration and affine.
+- MAT preserves original `fl_ch*` arrays; registered data is added as `fl_<channel>_registered`. `registration_json` and `calibration_json` preserve transforms and channel offsets.
+- Single-file exports stage writes before replacing destinations and protect source files and alignment reports. PNG sequences publish only after every slice is written, into a new or empty directory; existing nonempty folders are preserved.
+- The CLI uses one argparse tree. Unsupported or meaningless option combinations fail rather than being ignored.
+- The obsolete standalone diagnostic, which duplicated incorrect registration math, and its unused path-configuration helper were removed. Use `info`, `register` and the shared viewers. MATLAB uses the core SciPy exporter; the unused `matlab` and duplicate `all` extras were removed in favor of the `3d` extra.
+- `extract_line_profile(data, p1, p2, spacing)` accepts scalar isotropic spacing or `(y, x)` spacing. Physical points remain `(x, y)`; the old `res_xy` keyword was removed. It returns floating interpolated values and rejects out-of-range endpoints.
 
 ## Python API
 
 ```python
-import h5py
-from tomocube import TCFFile, TCFFileLoader, register_fl_to_ht, export_to_tiff
+from tomocube import (
+    TCFFileLoader, inspect_acquisition, analyze_acquisition,
+    estimate_translation, save_alignment, export_to_tiff,
+)
 
-with h5py.File("path/to/file.TCF", "r") as f:
-    info = TCFFile.from_hdf5(f)
-    print(info.ht_shape, info.ht_resolution, info.fl_channels)
+inventory = inspect_acquisition("sample.TCF")
+# Python analysis defaults to every timepoint; the CLI defaults to index 0.
+rows = analyze_acquisition("sample.TCF", channels=["HT", "CH1"], block_depth=8)
 
-with TCFFileLoader("path/to/file.TCF") as loader:
-    loader.load_timepoint(0)
-    ht = loader.data_3d              # (Z, Y, X), physical RI units
-    fl = loader.fl_data.get("CH0")   # raw FL volume if present
-
-    if fl is not None:
-        fl_reg = register_fl_to_ht(fl, ht.shape, loader.reg_params, channel="CH0")
-
-    # API default differs from CLI:
-    # export_to_tiff(...): bit_depth=16, normalize=True by default
-    export_to_tiff(loader, "output.tiff", bit_depth=32, normalize=False)
+with TCFFileLoader("sample.TCF") as loader:
+    loader.load_timepoint(0, fl_channels=["CH1"])
+    estimate = estimate_translation(loader.data_3d, loader.fl_data["CH1"],
+                                    loader.reg_params, channel="CH1", max_shift_um=(8, 5, 5))
+    save_alignment(loader, "CH1", estimate, "alignment.json")
+    if estimate.accepted:
+        export_to_tiff(loader, "aligned.tiff", channel="CH1", registration_path="alignment.json")
 ```
 
-## TCF Structure (General)
+See [INSTRUCTIONS.md](INSTRUCTIONS.md) for command details and controls, and [DATA_ANALYSIS.md](DATA_ANALYSIS.md) for the general TCF format.
 
-TCF is HDF5-based. Typical paths:
-
-```text
-Data/3D/<timepoint>          HT volume (Z, Y, X)
-Data/2DMIP/<timepoint>       optional MIP
-Data/3DFL/<channel>/<tp>     optional FL volume
-Info/Device                  optics/device metadata
-Info/MetaData/...            embedded config/experiment metadata
-```
-
-The loader normalizes HT values to physical RI units when files store scaled integer-like values. Metadata accepts scalars and singleton arrays. Missing resolution attributes use the documented instrument defaults with a warning; invalid supplied calibration raises a clear error instead of silently substituting a different spacing.
-
-## Development and Verification
+## Verification
 
 ```bash
-pip install -e ".[dev]"
 python -m pytest -q
 python -m build
 ```
 
-The regression suite creates synthetic TCF acquisitions and reads exported TIFF, MAT, GIF, and PNG files back to verify values, calibration, selection, metadata, and error behavior. Analytic fiducials cover anisotropic scaling, physical rotation/translation, channel offsets, and boundary planes. Matplotlib runs with the Agg backend to test rendered figures, keyboard/mouse callbacks, acquisition changes, and resource cleanup. These tests require no experimental data or GUI extras. CI runs on Linux with Python 3.10 and 3.14 and Windows with Python 3.12, then builds and installs the wheel.
+Core regression tests generate synthetic acquisitions, recover known transforms, challenge ambiguous inputs, read scientific exports back, exercise CLI workflows and Matplotlib callbacks, and verify block-reading/resource behavior. Optional napari tests exercise actual Image/ViewerModel geometry and PyQt6 docks. Core CI covers Linux Python 3.10/3.14 and Windows Python 3.12, including built-wheel tests. A separate Windows job checks napari geometry and Qt controls.
 
-Interactive viewer behavior and instrument-specific registration should also be checked with representative acquisitions before research use; the synthetic suite does not establish registration accuracy on experimental data.
+Run `python examples/registration_workflow.py output/new-qa-folder` to reproduce a synthetic acquisition, alignment, calibrated report, registered TIFF and viewer image. It records known-transform errors; alignment reports also record software versions. Use a fresh output directory.
 
-## Documentation
+This extension has no experimental-acquisition accuracy evidence. Synthetic numerical and optional layer/model tests do not establish full interactive or GPU rendering acceptance. Napari cannot faithfully slice a rotated native volume out of its transform plane: unsupported X/Y animation sweeps are rejected, and incompatible manual slice order is restored with a notice. Use `view`, `slice` or GIF export for those resampled orthogonal planes. Crop is render-only and applies to 3D display.
 
-- [INSTRUCTIONS.md](INSTRUCTIONS.md): detailed command and workflow reference.
-- [DATA_ANALYSIS.md](DATA_ANALYSIS.md): general Tomocube file/data format reference.
-
-## License
-
-MIT
+MIT license.

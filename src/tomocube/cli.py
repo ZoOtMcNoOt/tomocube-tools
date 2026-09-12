@@ -86,8 +86,10 @@ def _add_selection(parser: argparse.ArgumentParser) -> None:
 
 
 def _add_alignment(parser: argparse.ArgumentParser, *, default: str | None = "start") -> None:
-    parser.add_argument("--z-offset-mode", choices=("start", "center", "auto"), default=default,
+    alignment = parser.add_mutually_exclusive_group()
+    alignment.add_argument("--z-offset-mode", choices=("start", "center", "auto"), default=default,
                         help="metadata placement or intensity Z centering; auto is not image matching")
+    alignment.add_argument("--registration", metavar="JSON", help="apply a saved image alignment for this acquisition and channel")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -133,8 +135,9 @@ def build_parser() -> argparse.ArgumentParser:
         exporter = command(name, description, _export)
         _add_selection(exporter)
         exporter.add_argument("output", nargs="?", help="output path (default: source stem and selection)")
-        if name != "mat":
-            exporter.add_argument("--fl", type=_channel_name, metavar="CHANNEL", help="FL channel (GIF overlay default: CH0)")
+        exporter.add_argument("--fl", type=_channel_name, metavar="CHANNEL", help="FL channel (GIF overlay default: CH0)")
+        exporter.add_argument("--registered", action="store_true", help="resample selected fluorescence onto the HT grid")
+        _add_alignment(exporter, default=None)
         if name == "tiff":
             depth = exporter.add_mutually_exclusive_group()
             depth.add_argument("--16bit", dest="bit_depth", action="store_const", const=16)
@@ -147,12 +150,25 @@ def build_parser() -> argparse.ArgumentParser:
             exporter.add_argument("--overlay", action="store_true", help="blend HT with fluorescence")
             exporter.add_argument("--fps", type=_frame_rate, default=10, help="1-100 fps, rounded to 10 ms intervals")
             exporter.add_argument("--axis", choices=("z", "y", "x"), default="z")
-            _add_alignment(exporter, default=None)
         elif name == "png":
             exporter.add_argument("--prefix", type=_filename_prefix, help="filename prefix (default: channel name)")
             exporter.add_argument("--cmap", default="gray", help="Matplotlib colormap (default: gray)")
             exporter.add_argument("--vmin", type=_finite_number, help="lower display bound (default: 1st percentile)")
             exporter.add_argument("--vmax", type=_finite_number, help="upper display bound (default: 99th percentile)")
+
+    register = command("register", "Estimate and save image-based residual FL translation; reject weak or ambiguous matches.", _register)
+    _add_selection(register)
+    register.add_argument("output", nargs="?", help="alignment JSON (default: source and channel stem)")
+    register.add_argument("--fl", type=_channel_name, required=True, metavar="CHANNEL")
+    register.add_argument("--z-offset-mode", choices=("start", "center", "auto"), default="start",
+                          help="initial placement before image matching (default: start)")
+    register.add_argument("--max-shift", nargs=3, type=_finite_number, default=(10, 10, 10), metavar=("Z", "Y", "X"),
+                          help="positive per-axis search bounds in micrometers (default: 10 10 10)")
+    register.add_argument("--max-dimension", type=_positive_integer, default=64, help="coarse grid limit per axis, 8-128 (default: 64)")
+    register.add_argument("--min-score", type=_finite_number, default=0.6)
+    register.add_argument("--min-peak-margin", type=_finite_number, default=0.03)
+    register.add_argument("--min-overlap", type=_finite_number, default=0.5)
+    register.add_argument("--overwrite", action="store_true", help="replace an existing alignment report")
 
     analyze = command("analyze", "Measure native calibrated volumes in bounded Z blocks; batch inputs are explicit paths.", _analyze)
     analyze.add_argument("files", nargs="+", metavar="file.TCF")
@@ -181,8 +197,24 @@ def build_parser() -> argparse.ArgumentParser:
 def _validate_options(parser: argparse.ArgumentParser, options: argparse.Namespace) -> None:
     if options.command == "tiff" and options.bit_depth == 16 and not options.normalize:
         parser.error("--16bit requires --normalize; use --32bit to preserve physical values")
-    if options.command == "gif" and options.z_offset_mode is not None and not options.overlay:
-        parser.error("--z-offset-mode requires --overlay")
+    if getattr(options, "registration", None) and not options.fl:
+        parser.error("--registration requires --fl")
+    if options.command in ("tiff", "mat", "gif", "png"):
+        registered = options.registered or options.registration is not None
+        overlay = options.command == "gif" and options.overlay
+        if registered and not options.fl:
+            parser.error("--registered requires --fl")
+        if options.z_offset_mode is not None and not (registered or overlay):
+            parser.error("--z-offset-mode requires --registered or --overlay")
+        if options.command == "mat" and options.no_fl and (options.fl or registered):
+            parser.error("--no-fl cannot be combined with fluorescence selection or registration")
+    if options.command == "register":
+        if any(value <= 0 for value in options.max_shift):
+            parser.error("--max-shift values must be positive")
+        if not 8 <= options.max_dimension <= 128:
+            parser.error("--max-dimension must be between 8 and 128")
+        if any(not 0 < value <= 1 for value in (options.min_score, options.min_peak_margin, options.min_overlap)):
+            parser.error("registration score, peak margin and overlap thresholds must be in (0, 1]")
     if options.command == "png":
         from matplotlib import colormaps
 
@@ -236,7 +268,7 @@ def _view(options: argparse.Namespace) -> int:
     viewer_type = TCFViewer if options.command == "view" else SliceViewer
     with redirect_stdout(sys.stderr):
         with viewer_type(options.file, timepoint=options.timepoint, fl_channel=options.fl,
-                         z_offset_mode=options.z_offset_mode) as viewer:
+                         z_offset_mode=options.z_offset_mode, registration_path=options.registration) as viewer:
             viewer.show()
     return 0
 
@@ -247,7 +279,8 @@ def _view3d(options: argparse.Namespace) -> int:
     with redirect_stdout(sys.stderr):
         view_3d(options.file, timepoint=options.timepoint, fl_channel=options.fl,
                 show_slices=options.slices, rendering=options.render,
-                screenshot=options.screenshot, z_offset_mode=options.z_offset_mode)
+                screenshot=options.screenshot, z_offset_mode=options.z_offset_mode,
+                registration_path=options.registration)
     return 0
 
 
@@ -257,6 +290,8 @@ def _export_path(options: argparse.Namespace) -> Path:
     stem = Path(options.file).stem
     if options.timepoint:
         stem += f"_t{options.timepoint}"
+    if options.registered or options.registration:
+        stem += "_registered"
     if options.command == "mat":
         return Path(stem + ".mat")
     if options.command == "tiff":
@@ -273,8 +308,10 @@ def _export(options: argparse.Namespace) -> int:
     from tomocube.processing.export import export_overlay_gif, export_to_gif, export_to_mat, export_to_png_sequence, export_to_tiff
 
     output = _export_path(options)
+    registration_options = dict(registered=options.registered, z_offset_mode=options.z_offset_mode or "start",
+                                registration_path=options.registration)
     if options.command == "mat":
-        channels = [] if options.no_fl else None
+        channels = [] if options.no_fl else [options.fl] if options.fl else None
     elif options.command == "gif" and options.overlay:
         channels = [options.fl or "CH0"]
     else:
@@ -283,21 +320,45 @@ def _export(options: argparse.Namespace) -> int:
         loader.load_timepoint(options.timepoint, fl_channels=channels)
         if options.command == "tiff":
             result = export_to_tiff(loader, output, channel=options.fl or "ht",
-                                    bit_depth=options.bit_depth, normalize=options.normalize)
+                                    bit_depth=options.bit_depth, normalize=options.normalize, **registration_options)
         elif options.command == "mat":
-            result = export_to_mat(loader, output, include_fl=not options.no_fl)
+            result = export_to_mat(loader, output, include_fl=not options.no_fl,
+                                   fl_channel=options.fl, **registration_options)
         elif options.command == "png":
             result = export_to_png_sequence(loader, output, channel=options.fl or "ht",
                                             prefix=options.prefix or "", cmap=options.cmap,
-                                            vmin=options.vmin, vmax=options.vmax)
+                                            vmin=options.vmin, vmax=options.vmax, **registration_options)
         elif options.overlay:
             result = export_overlay_gif(loader, output, axis=options.axis, fps=options.fps,
-                                        fl_channel=options.fl or "CH0", z_offset_mode=options.z_offset_mode or "start")
+                                        fl_channel=options.fl or "CH0", z_offset_mode=options.z_offset_mode or "start",
+                                        registration_path=options.registration)
         else:
-            result = export_to_gif(loader, output, channel=options.fl or "ht", axis=options.axis, fps=options.fps)
+            result = export_to_gif(loader, output, channel=options.fl or "ht", axis=options.axis,
+                                   fps=options.fps, **registration_options)
     for path in result if isinstance(result, list) else [result]:
         print(path)
     return 0
+
+
+def _register(options: argparse.Namespace) -> int:
+    from dataclasses import asdict
+    from tomocube.core.file import TCFFileLoader
+    from tomocube.processing.alignment import estimate_translation, save_alignment
+
+    suffix = f"_t{options.timepoint}" if options.timepoint else ""
+    output = options.output or f"{Path(options.file).stem}{suffix}_{options.fl}_registration.json"
+    if Path(output).exists() and not options.overwrite:
+        raise FileExistsError(f"Output already exists: {output}; choose another path or --overwrite")
+    with redirect_stdout(sys.stderr), TCFFileLoader(options.file) as loader:
+        loader.load_timepoint(options.timepoint, fl_channels=[options.fl])
+        result = estimate_translation(loader.data_3d, loader.fl_data[options.fl], loader.reg_params,
+                                      channel=options.fl, z_offset_mode=options.z_offset_mode,
+                                      max_shift_um=options.max_shift, max_dimension=options.max_dimension,
+                                      min_score=options.min_score, min_peak_margin=options.min_peak_margin,
+                                      min_overlap=options.min_overlap)
+        save_alignment(loader, options.fl, result, output, overwrite=options.overwrite)
+    print(json.dumps({"report": str(output), **asdict(result)}, indent=2, allow_nan=False))
+    return 0 if result.accepted else 1
 
 
 def _analyze(options: argparse.Namespace) -> int:

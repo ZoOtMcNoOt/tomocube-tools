@@ -1,316 +1,133 @@
-# Tomocube Tools Instructions
+# Tomocube Tools command reference
 
-Reference guide for the `tomocube-tools` CLI and Python API.
+Use `tomocube COMMAND --help` for the parser's complete option list. `python -m tomocube` is equivalent. See [README.md](README.md) for coordinate conventions, scientific limits, installation and changes in 1.1.
 
-## Installation
+## Common selection and outputs
 
-```bash
-pip install -e .
-```
+`--timepoint N` is a zero-based index into numerically sorted HT keys. Viewers and exporters default to 0. `--fl CH1` selects fluorescence; 2D viewers default to the first available channel, 3D displays all channels by default, and overlay GIF defaults to CH0.
 
-Optional extras:
+Viewer placement accepts `--z-offset-mode start|center|auto` or `--registration alignment.json`. Export registration accepts `--registered` with an optional Z mode, or a saved `--registration` (which implies registration). A saved report requires explicit `--fl`; its own base mode applies. Native exports reject placement options that would have no effect.
 
-```bash
-# napari 3D viewer + animation dependencies
-pip install -e ".[3d]"
+Default output paths use the current directory and input stem. Nonzero timepoints add `_tN`; registered exports add `_registered`; TIFF/PNG and explicitly selected FL GIF outputs also identify the channel. Explicit output paths may occur before or after options. Source acquisitions and saved registrations are protected from replacement.
 
-# all extras
-pip install -e ".[all]"
-```
+Single-file outputs replace previous output files only after a successful write. Alignment reports require `--overwrite`. PNG output directories must be new or empty; complete sequences are published together. Choose a new directory to keep separate acquisitions or reruns.
 
-## CLI Basics
-
-General form:
+## Inspection and measurement
 
 ```bash
-python -m tomocube [global-options] <command> <file.TCF> [command-options]
+tomocube info sample.TCF
+tomocube info sample.TCF --json
+tomocube analyze sample.TCF --all-timepoints --channel HT --channel CH0 --output measurements.json
+tomocube analyze one.TCF two.TCF --timepoint 1 --format csv --output comparison.csv
+tomocube analyze sample.TCF --roi 0 10 20 80 30 90 --threshold 1.36 --block-depth 4
 ```
 
-The installed `tomocube` command accepts the same arguments.
+`info` reads headers and related `.experiment`, `.vessel` and `profile/*.prf` metadata. JSON includes every HT/FL combination and orphan FL keys, native shapes/dtypes, uncompressed byte sizes, instrument metadata and calibration/default provenance.
 
-Global options:
+`analyze` accepts multiple explicit file paths. `--timepoint N` and `--all-timepoints` are exclusive. Repeat `--channel` to choose HT and/or FL channels; default is HT. `--format json|csv` defaults to JSON; omit `--output` to write stdout. CSV encodes vector/nested fields as JSON within cells.
 
-- `-V`, `--verbose`: verbose registration/debug output.
+`--roi Z0 Z1 Y0 Y1 X0 X1` uses strict nonnegative, half-open native voxel bounds. Coordinates must lie within every selected available volume; no clipping is silently applied. `--threshold N` means `value >= N` in RI units for HT or native fluorescence counts. Missing channel acquisitions yield rows with `status=missing` and null statistics. Unknown channel names fail. No incomplete report is published if another input fails.
 
-Help/version entry points:
+Statistics are count, min/max, population mean/std, sampled volume in cubic micrometers and intensity-times-volume integral. Threshold adds selected count and volume. This does not perform cell segmentation, background subtraction or dry-mass inference. See README for block memory and RI scaling behavior.
 
-- `python -m tomocube help`
-- `python -m tomocube --help`
-- `python -m tomocube --version`
-- `python -m tomocube <command> --help` for `view`, `slice`, `tiff`, `mat`, and `gif`
-
-For `view`, `slice`, `tiff`, `mat`, and `gif`, `--timepoint N` selects a zero-based index into the available HT acquisitions. Numeric keys sort numerically (`0`, `1`, `2`, `10`); the default index is `0`. Missing or invalid option values are reported before loading data. Out-of-range indices produce an error without creating an output file.
-
-## Commands
-
-### `info`
-
-Show TCF metadata.
+## Image alignment
 
 ```bash
-python -m tomocube info path/to/file.TCF
+tomocube register sample.TCF alignment.json --fl CH1 --timepoint 0 --max-shift 8 5 5
+tomocube slice sample.TCF --fl CH1 --registration alignment.json
 ```
 
-Includes:
+Initial placement is `--z-offset-mode start` unless selected otherwise. `auto` centers FL signal in Z; the subsequent image estimator is a separate operation. `--max-shift Z Y X` bounds each translation component in micrometers (default 10,10,10). `--max-dimension` controls coarse sampling (8-128, default 64). Diagnostic acceptance settings are `--min-score` (default 0.6), `--min-peak-margin` (0.03), and `--min-overlap` (0.5), each in `(0,1]`.
 
-- HT dimensions/resolution/FOV/RI range
-- fluorescence channels and sizes (if present)
-- optics metadata (magnification, NA, medium RI)
-- detected instrument identifiers (if embedded)
-- related sidecar metadata (`.experiment`, `.vessel`, `profile/*.prf`) when present
+The JSON records accepted/rejected status, reason, candidate residual, original calibration, full affine, source hashes and numerical diagnostics. A rejected estimate still writes its diagnostic report, prints a JSON summary and exits 1. It cannot be applied to exports or viewers. Existing reports require `--overwrite`.
 
-### `view`
+This method assumes shared positive-contrast structures and estimates translation after metadata rotation/scale. It can reject different biological contrast, periodic structures, flat directions, insufficient initial overlap, too-small sampled extent or fine texture missed by coarse sampling. Scores are not probabilities of biological correctness. Check the images and report; no experimental-acquisition accuracy is established.
 
-Orthogonal 2D HT viewer with optional FL overlays and measurement tools.
+## Scientific exports
 
 ```bash
-python -m tomocube view path/to/file.TCF [--timepoint N] [--fl CHANNEL] [--z-offset-mode start|center|auto]
+# Default TIFF: native physical RI, float32
+tomocube tiff sample.TCF output.tiff
+# Display normalization is explicit
+tomocube tiff sample.TCF display.tiff --16bit --normalize
+# Metadata-aligned FL or a saved image estimate
+tomocube tiff sample.TCF fl.tiff --fl CH1 --registered --z-offset-mode center
+tomocube tiff sample.TCF fl.tiff --fl CH1 --registration alignment.json
+# MATLAB keeps native FL and optionally adds registered data
+tomocube mat sample.TCF output.mat
+tomocube mat sample.TCF ht-only.mat --no-fl
+tomocube mat sample.TCF aligned.mat --fl CH1 --registration alignment.json
 ```
 
-Default `z-offset-mode` for `view`: `start`.
+TIFF preserves independent XYZ spacing using ImageJ metadata and XY resolution tags. The `Info` field is JSON with source, acquisition, channel, value units, normalization and optional registration. Float32 is the API and CLI default; 16-bit requires normalization.
 
-A file path is required. The default FL channel is the first available at the selected timepoint. Press `F` to show fluorescence or `N` to show the next channel. The timepoint slider preserves the chosen channel; missing fluorescence is marked unavailable, and failed loads preserve the preceding display.
+MAT writes `ht_3d`, `ht_mip`, native `fl_ch*`, `metadata`, `resolution`, and `calibration_json`. `--fl` limits the included FL channel. Registered FL is an additional `fl_<channel>_registered` variable, accompanied by `registration_json`; native arrays stay intact. Missing optical fields are omitted. `--no-fl` cannot combine with FL selection or registration.
 
-### `slice`
-
-Side-by-side HT / FL / overlay slice viewer.
+## Display exports
 
 ```bash
-python -m tomocube slice path/to/file.TCF [--timepoint N] [--fl CHANNEL] [--z-offset-mode start|center|auto]
+tomocube gif sample.TCF animation.gif --axis y --fps 15
+tomocube gif sample.TCF fluorescence.gif --fl CH1
+tomocube gif sample.TCF overlay.gif --overlay --fl CH1 --registration alignment.json
+tomocube png sample.TCF slices --fl CH1 --registered --prefix channel1 --cmap inferno
 ```
 
-Default `z-offset-mode` for `slice`: `start`.
+GIF accepts `--axis z|y|x` and integer `--fps` from 1 to 100; timing rounds to 10 ms intervals. `--overlay` blends HT with registered FL. PNG exports Z planes with optional `--prefix`, `--cmap`, `--vmin` and `--vmax`. Both formats contain display colors rather than scientific intensity arrays; use TIFF/MAT for quantitative work.
 
-A file path is required. This viewer opens one selected timepoint. The default FL channel is the first available; an explicitly requested channel must exist at that timepoint. HT-only acquisitions use a single panel.
-
-### `view3d`
-
-3D napari viewer.
+## Viewers
 
 ```bash
-python -m tomocube view3d path/to/file.TCF [options]
+tomocube view sample.TCF --timepoint 2 --fl CH1
+tomocube slice sample.TCF --fl CH1 --registration alignment.json
+tomocube view3d sample.TCF --timepoint 2 --fl CH1 --render mip
 ```
 
-Options:
+`view` provides XY/XZ/YZ navigation. It prepares both data and registration before switching acquisitions. Failed loads preserve preceding pictures/hover/save data; absent fluorescence is marked unavailable. Saved registration files bind to one acquisition/channel; switching to an incompatible selection fails visibly. `slice` opens one selected timepoint.
 
-- `--slices`: start in 2D slice mode.
-- `--render mip|attenuated_mip|minip|average`: initial rendering mode.
-- `--z-offset-mode auto|start|center`: FL alignment mode.
-- `--screenshot <file>`: save screenshot path.
-
-Default `z-offset-mode` for `view3d`: `auto`.
-
-### `tiff`
-
-Export HT or FL stack to TIFF.
-
-```bash
-python -m tomocube tiff path/to/file.TCF [output.tiff] [options]
-```
-
-Options:
-
-- `--fl <channel>`: export FL channel (example: `CH0`) instead of HT.
-- `--32bit`: 32-bit float output (CLI default).
-- `--16bit`: 16-bit output (requires `--normalize`).
-- `--normalize`: normalize to display range before export.
-- `--timepoint <N>`: export one acquisition by zero-based index (default `0`).
-
-Notes:
-
-- CLI default behavior preserves HT physical RI values (`--32bit` without normalization).
-- If output path is omitted, default is `<stem>_<channel>.tiff`.
-- A nonzero timepoint index adds `_t<N>` before the channel suffix, for example `<stem>_t2_ht.tiff`.
-- X, Y, and Z spacing are preserved independently in ImageJ metadata. The ImageJ `Info` field records the source filename, acquisition key, and normalization information.
-- Constant volumes normalize to zero without producing NaN values. The Python API also rejects `bit_depth=16, normalize=False`.
-
-### `mat`
-
-Export to MATLAB `.mat`.
-
-```bash
-python -m tomocube mat path/to/file.TCF [output.mat] [--no-fl] [--timepoint N]
-```
-
-Notes:
-
-- If output path is omitted, default is `<stem>.mat`.
-- `--no-fl` excludes fluorescence volumes.
-- A nonzero `--timepoint N` changes the default filename to `<stem>_t<N>.mat`.
-
-MAT keys written by current exporter:
-
-- `ht_3d`
-- `ht_mip`
-- `fl_ch0`, `fl_ch1`, ... (if included)
-- `metadata` (dict)
-- `resolution` (dict)
-
-`metadata` includes the source filename and selected acquisition key (`timepoint`). Unavailable optical values such as magnification, numerical aperture, or medium RI are omitted rather than replaced with invented values.
-
-### `gif`
-
-Export GIF animation.
-
-```bash
-python -m tomocube gif path/to/file.TCF [output.gif] [options]
-```
-
-Options:
-
-- `--overlay`: export HT+FL overlay animation.
-- `--fps <N>`: integer frame rate from 1 to 100 (default `10`), rounded to the nearest 10 ms frame interval supported by GIF.
-- `--axis z|y|x`: animation axis (default `z`).
-- `--z-offset-mode start|center|auto`: used for overlay mode.
-- `--timepoint <N>`: zero-based acquisition index (default `0`).
-- `--fl <channel>`: select an FL channel for a fluorescence-only GIF or an HT+FL overlay.
-
-Notes:
-
-- Overlay mode uses FL channel `CH0` unless `--fl` is supplied.
-- Default output naming is `<stem>_<axis>.gif` (non-overlay) or `<stem>_overlay.gif` (overlay).
-- A selected nonzero timepoint and explicit FL channel add `_t<N>` and `_<channel>` before the final suffix.
-- Default `z-offset-mode` for overlay exports: `start`.
-
-## Registration Modes
-
-`z-offset-mode` meanings:
-
-- `start`: the channel's `OffsetZ` places the first FL voxel center in HT space.
-- `center`: the channel's `OffsetZ` places the FL geometric center in HT space.
-- `auto`: 2D viewers and registration/overlay exports align the intensity-weighted FL Z center to the geometric HT center, with geometric fallback for zero signal. The separate 3D viewer uses geometric centering.
-
-For 2D viewers and registration, centers are at `index × spacing`; image edges extend half a voxel past the centers. Independent XYZ spacings and physical XY rotation/translation are applied by a shared linear sampler. Positive manual FL Z adjustments move the display toward larger HT Z without altering source data or exported calibration. See [Registration Behavior](README.md#registration-behavior) for the coordinate convention and changes from earlier output.
-
-Defaults by path:
-
-| Path | Default mode |
+| Key | Orthogonal viewer action |
 |---|---|
-| `view` | `start` |
-| `slice` | `start` |
-| `gif --overlay` | `start` |
-| `view3d` | `auto` |
-| `register_fl_to_ht(...)` API | `start` |
+| Arrows / Home / End | Adjust focused slider / endpoints |
+| A / G / R | Slice contrast / global contrast / reset |
+| I / 1-6 | Invert / choose colormap |
+| F / N | Toggle fluorescence / next channel |
+| D / P / C | Distance / polygon area / clear measurements |
+| M | Save MIP PNG |
+| Q / Escape | Quit, or cancel an active measurement |
 
-## Viewer Controls
+Scroll on XY moves Z; scroll on XZ moves Y; clicks move crosshairs. Navigation sliders use physical coordinates and hide singleton axes. Manual FL Z adjustment affects display only. The slice viewer supports slider navigation, arrows, Home/End and Q/Escape.
 
-### `view` (2D orthogonal viewer)
+`view3d` requires optional napari dependencies. Options are `--slices`, `--render mip|attenuated_mip|minip|average`, `--screenshot PATH`, common timepoint/FL selection and alignment options. Camera/Crop and Layers/Histogram/FL Z/Animation docks expose navigation, 3D clipping and animation. Native arrays stay unchanged. Camera keys 1-6 select orthogonal presets; 0 is isometric; R resets; F fits; +/- zoom.
 
-Keys:
+Napari's native rotated volumes have an out-of-slice limitation. Unsupported X/Y animation sweeps fail before capture, and incompatible manual slicing orders are restored with a notice. Use the 2D viewers or GIF exporter for resampled orthogonal planes. Crop is render-only in 3D and does not export a cropped scientific dataset.
 
-- Arrow keys: move a position slider by one sample, or a continuous slider by 2%.
-- `Home` / `End`: min/max active slider.
-- `A`: auto contrast (slice).
-- `G`: global contrast.
-- `R`: reset view.
-- `I`: invert colormap.
-- `F`: toggle FL overlay.
-- `N`: show the next fluorescence channel with its channel-specific offset.
-- `D`: distance measurement.
-- `P`: area/polygon measurement.
-- `C`: clear measurements.
-- `M`: save MIP PNG.
-- `1`-`6`: colormap selection.
-- `Q` / `Escape`: quit or cancel active measurement.
-
-Mouse:
-
-- Scroll in XY view: move Z.
-- Scroll in XZ view: move Y.
-- Click in views: move crosshair position.
-
-UI buttons also expose save/reset/contrast actions.
-
-### `slice`
-
-Keys:
-
-- Arrow keys: move active slider.
-- `Home` / `End`: min/max active slider.
-- `Q` / `Escape`: quit.
-
-### `view3d` (napari)
-
-Dock panels:
-
-- Left: `Camera`, `Crop`
-- Right: `Layers`, `Histogram`, `FL Z` (when FL exists), `Animation`
-
-Camera shortcuts:
-
-- `1`-`6`: top/bottom/front/back/left/right
-- `0`: isometric
-- `R`: reset
-- `F`: fit
-- `+` / `=` and `-`: zoom
-
-Animation export is provided from the `Animation` dock (turntable and slice sweep, GIF/MP4).
-
-## Python API Quick Reference
+## Python measurements
 
 ```python
-import h5py
-from tomocube import (
-    TCFFile,
-    TCFFileLoader,
-    register_fl_to_ht,
-    export_to_tiff,
-    export_to_mat,
-    export_to_gif,
-)
+from tomocube import TCFFileLoader, analyze_acquisition, extract_line_profile
 
-with h5py.File("path/to/file.TCF", "r") as f:
-    meta = TCFFile.from_hdf5(f)
-    print(meta.ht_shape, meta.has_fluorescence, meta.fl_channels)
+# API defaults to all timepoints (CLI defaults to index 0).
+rows = analyze_acquisition("sample.TCF", channels=["HT"],
+                           roi=((0, 10), (20, 80), (30, 90)), threshold=1.36)
 
-with TCFFileLoader("path/to/file.TCF") as loader:
-    loader.load_timepoint(0)
-    ht = loader.data_3d
-    fl = loader.fl_data.get("CH0")
-
-    if fl is not None:
-        fl_reg = register_fl_to_ht(fl, ht.shape, loader.reg_params, channel="CH0")
-
-    # API defaults differ from CLI for TIFF:
-    # bit_depth=16, normalize=True
-    export_to_tiff(loader, "out.tiff", bit_depth=32, normalize=False)
-    export_to_mat(loader, "out.mat", include_fl=True)
-    export_to_gif(loader, "out.gif", axis="z", fps=10)
+with TCFFileLoader("sample.TCF") as loader:
+    loader.load_timepoint(0, fl_channels=[])
+    # Points are physical (x,y); spacing is (y,x), in micrometers.
+    distances, values = extract_line_profile(
+        loader.data_3d[0], (0, 0), (5, 3),
+        (loader.reg_params.ht_res_y, loader.reg_params.ht_res_x),
+    )
+    # Streaming reads do not replace the eager cache.
+    for block in loader.iter_volume_blocks(0, channel="HT", block_depth=4):
+        pass
 ```
+
+Profile endpoints must lie within voxel-center bounds, spacing must be positive, and sample count must be at least two. Native integer inputs interpolate to floating values. The scalar spacing form remains useful for isotropic images; the obsolete `res_xy` keyword is removed.
 
 ## Troubleshooting
 
-### `view3d` fails with napari import error
-
-Install 3D extras:
-
-```bash
-pip install -e ".[3d]"
-```
-
-### `tiff` with `--16bit` fails
-
-`--16bit` requires `--normalize` by design.
-
-```bash
-python -m tomocube tiff file.TCF out.tiff --16bit --normalize
-```
-
-### Overlay GIF reports missing fluorescence
-
-The selected acquisition has no FL data or lacks the requested channel (`CH0` by default).
-Check with:
-
-```bash
-python -m tomocube info file.TCF
-```
-
-Select an available channel explicitly, for example `tomocube gif file.TCF --overlay --fl CH1`.
-
-### Invalid resolution metadata
-
-Resolution values must be positive, finite numbers stored as scalars or singleton arrays. Errors identify the HDF5 path and attribute. Missing attributes still use documented defaults with a warning; present but invalid values are rejected to avoid changing physical calibration silently.
-
-### File cannot be opened
-
-Validate that the TCF is readable HDF5 and has expected paths like `Data/3D/<timepoint>`.
+- Missing/invalid metadata: absent spacing uses instrument defaults with a warning and provenance; present nonpositive or nonfinite spacing is rejected.
+- Missing channel: inspect `info --json`, then select an available channel at the requested acquisition.
+- Rejected alignment: inspect `reason`, scores, grid spacing and bounds. Do not edit an accepted flag to force application; choose appropriate metadata placement or obtain representative shared structures.
+- Mismatched saved registration: re-estimate for the selected source/acquisition/channel. Original calibration and pixels are part of the binding.
+- Existing PNG directory: choose a new or empty directory; existing frames are preserved.
+- 3D import/rendering failure: install the 3D extra with a supported Qt/OpenGL environment. Offscreen platforms do not necessarily supply an OpenGL context.

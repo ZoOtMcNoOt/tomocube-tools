@@ -108,8 +108,12 @@ def _timepoint_key(name: str) -> tuple:
 
 def _physical_ri(raw: np.ndarray, *, divisor: float | None = None) -> np.ndarray:
     """Apply the TCF RI scale consistently to volumes and stored projections."""
+    if not np.isfinite(raw).all():
+        raise TCFFileError("HT data or projection contains nonfinite intensities")
     if divisor is None:
         divisor = 10000.0 if np.issubdtype(raw.dtype, np.integer) or raw.max() > 100 else 1.0
+    if raw.max() > np.finfo(np.float32).max or raw.min() < -np.finfo(np.float32).max:
+        raise TCFFileError("HT data or projection cannot be represented as float32")
     data = raw.astype(np.float32)
     return data / divisor if divisor != 1.0 else data
 

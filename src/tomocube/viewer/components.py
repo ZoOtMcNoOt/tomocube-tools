@@ -84,8 +84,10 @@ class FluorescenceMapper:
 
     def __init__(self, fl_data: np.ndarray, ht_shape: tuple[int, int, int],
                  reg_params: RegistrationParams, channel: str | None = None,
-                 z_offset_mode: str = "start"):
-        self.registration = FluorescenceRegistration(fl_data, ht_shape, reg_params, channel, z_offset_mode)
+                 z_offset_mode: str = "start", *, translation_um=(0, 0, 0)):
+        self.registration = FluorescenceRegistration(
+            fl_data, ht_shape, reg_params, channel, z_offset_mode, translation_um=translation_um,
+        )
         self.ht_shape = ht_shape
         self.spacing = (reg_params.ht_res_z, reg_params.ht_res_y, reg_params.ht_res_x)
         self._cache: dict[int, tuple[tuple, FlSliceResult]] = {}

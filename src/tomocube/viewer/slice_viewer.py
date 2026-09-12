@@ -40,7 +40,7 @@ class SliceViewer:
     DARK_FG = "#2d2d2d"
 
     def __init__(self, tcf_path: str | Path, z_offset_mode: str = "start", *,
-                 timepoint: int = 0, fl_channel: str | None = None) -> None:
+                 timepoint: int = 0, fl_channel: str | None = None, registration_path=None) -> None:
         """Initialize the slice viewer.
         
         Args:
@@ -53,6 +53,9 @@ class SliceViewer:
         if z_offset_mode not in Z_OFFSET_MODES:
             raise ValueError(f"z_offset_mode must be one of {Z_OFFSET_MODES}")
         self.z_offset_mode = z_offset_mode
+        if registration_path is not None and fl_channel is None:
+            raise ValueError("A saved registration requires an explicit fluorescence channel")
+        self.registration_path = registration_path
         self.timepoint = timepoint
         self.fl_channel = fl_channel
         self.fl_z_offset_um = 0.0
@@ -75,6 +78,7 @@ class SliceViewer:
 
     def _load_data(self) -> None:
         """Use the common loader for numeric timepoints and calibrated channels."""
+        translation = (0, 0, 0)
         with TCFFileLoader(self.tcf_path) as loader:
             loader.load_timepoint(self.timepoint)
             self.timepoint_key = loader.current_timepoint
@@ -86,6 +90,10 @@ class SliceViewer:
             self.fl_3d = loader.fl_data.get(self.fl_channel)
             self.has_fl = self.fl_3d is not None
             self.fl_vmin, self.fl_vmax = loader.get_fl_contrast(self.fl_channel) if self.has_fl else (0, 1)
+            if self.registration_path is not None:
+                from tomocube.processing.alignment import load_alignment
+                alignment = load_alignment(self.registration_path, loader, self.fl_channel)
+                self.z_offset_mode, translation = alignment.z_offset_mode, alignment.translation_um
         self.spacing = (self.params.ht_res_z, self.params.ht_res_y, self.params.ht_res_x)
         self.res_z = self.params.ht_res_z
         self.ht_fov_z, self.ht_fov_y, self.ht_fov_x = (
@@ -96,6 +104,7 @@ class SliceViewer:
         if self.has_fl:
             self._fl_mapper = FluorescenceMapper(
                 self.fl_3d, self.ht_3d.shape, self.params, self.fl_channel, self.z_offset_mode,
+                translation_um=translation,
             )
 
     def _get_ht_extent(self) -> list[float]:

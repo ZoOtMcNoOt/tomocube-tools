@@ -26,6 +26,12 @@ from tomocube.core import (
 from tomocube.processing import (
     # Registration
     register_fl_to_ht,
+    AlignmentResult,
+    estimate_translation,
+    load_alignment,
+    save_alignment,
+    analyze_acquisition,
+    inspect_acquisition,
     # Image processing
     normalize_image,
     normalize_with_bounds,
@@ -55,7 +61,7 @@ from tomocube.viewer import (
     extract_line_profile,
 )
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 __all__ = [
     # Core - File I/O
@@ -71,6 +77,12 @@ __all__ = [
     "TCFNoFluorescenceError",
     # Processing
     "register_fl_to_ht",
+    "AlignmentResult",
+    "estimate_translation",
+    "load_alignment",
+    "save_alignment",
+    "analyze_acquisition",
+    "inspect_acquisition",
     "normalize_image",
     "normalize_with_bounds",
     "compute_overlap_score",

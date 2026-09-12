@@ -30,10 +30,18 @@ from tomocube.processing.metadata import (
     parse_ini_string,
 )
 from tomocube.processing.registration import register_fl_to_ht
+from tomocube.processing.alignment import AlignmentResult, estimate_translation, load_alignment, save_alignment
+from tomocube.processing.analysis import analyze_acquisition, inspect_acquisition
 
 __all__ = [
     # Registration
     "register_fl_to_ht",
+    "AlignmentResult",
+    "estimate_translation",
+    "load_alignment",
+    "save_alignment",
+    "analyze_acquisition",
+    "inspect_acquisition",
     # Image processing
     "normalize_image",
     "normalize_with_bounds",

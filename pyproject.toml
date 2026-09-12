@@ -14,7 +14,7 @@ dependencies = [
     "scipy",
     "matplotlib",
     "tifffile",
-    "imageio",
+    "Pillow",
     "imagecodecs",
 ]
 
@@ -23,9 +23,7 @@ tomocube = "tomocube.__main__:main"
 
 [project.optional-dependencies]
 dev = ["pytest>=7", "build"]
-matlab = ["hdf5storage"]
-3d = ["napari[all]>=0.4.19", "imageio-ffmpeg", "pyqtgraph"]
-all = ["hdf5storage", "napari[all]>=0.4.19", "imageio-ffmpeg", "pyqtgraph"]
+3d = ["napari[pyqt6]>=0.9.1", "imageio", "imageio-ffmpeg", "pyqtgraph"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -46,5 +44,5 @@ reportMissingTypeStubs = false
 # h5py Dataset/Group assignment issues - stub limitations
 reportAssignmentType = "warning"
 
-# Optional import for hdf5storage (used when available)
+# GUI dependencies are optional.
 reportMissingImports = "warning"

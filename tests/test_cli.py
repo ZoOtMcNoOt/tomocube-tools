@@ -65,7 +65,7 @@ def test_cli_passes_viewer_selection(cli, monkeypatch, command, class_name):
     assert cli(command, "--timepoint", "2", "sample file.TCF", "--fl", "CH1",
                "--z-offset-mode", "center") == 0
     assert received == {"path": "sample file.TCF", "timepoint": 2, "fl_channel": "CH1",
-                        "z_offset_mode": "center", "shown": True, "closed": True}
+                        "z_offset_mode": "center", "registration_path": None, "shown": True, "closed": True}
 
 
 @pytest.mark.parametrize("command", ["view", "slice"])
@@ -202,7 +202,7 @@ def test_view3d_forwards_every_selection(cli, monkeypatch):
     assert cli("view3d", "--timepoint", "2", "sample file.TCF", "--fl", "CH1", "--slices",
                "--render", "average", "--screenshot", "view.png", "--z-offset-mode", "center") == 0
     assert received == dict(path="sample file.TCF", timepoint=2, fl_channel="CH1", show_slices=True,
-                            rendering="average", screenshot="view.png", z_offset_mode="center")
+                            rendering="average", screenshot="view.png", z_offset_mode="center", registration_path=None)
 
 
 def test_info_json_contains_inventory_and_related_metadata(cli, make_tcf, tmp_path, capsys, monkeypatch):
