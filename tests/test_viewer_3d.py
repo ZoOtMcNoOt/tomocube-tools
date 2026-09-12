@@ -325,7 +325,7 @@ def test_saved_alignment_applies_only_to_selected_channel(make_tcf, tmp_path, fa
 
     path = make_tcf(fluorescence=True)
     result = AlignmentResult(True, "accepted", (1, -2, 3), 0.2, 0.95, 0.3, 0.9,
-                             "center", (1, 1, 1), (5, 5, 5), 0.6, 0.03, 0.5)
+                             "center", (1, 1, 1), (5, 5, 5), 0.6, 0.03, 0.5, 64)
     saved = tmp_path / "alignment.json"
     with TCFFileLoader(path) as loader:
         loader.load_timepoint(0)
@@ -365,7 +365,7 @@ def test_screenshot_and_animation_cannot_overwrite_alignment_report(make_tcf, fa
 
     path = make_tcf(fluorescence=True)
     result = AlignmentResult(True, "accepted", (0, 0, 0), 0.9, 0.95, 0.3, 0.9,
-                             "start", (1, 1, 1), (5, 5, 5), 0.6, 0.03, 0.5)
+                             "start", (1, 1, 1), (5, 5, 5), 0.6, 0.03, 0.5, 64)
     # The sidecar format is JSON even when a caller supplied a media suffix.
     report = tmp_path / "alignment.gif"
     with TCFFileLoader(path) as loader:
@@ -417,6 +417,7 @@ def test_out_of_plane_rotation_rejects_sweep_without_changing_view(tmp_path):
 
 
 def test_turntable_gif_retains_canvas_and_millisecond_timing(tmp_path, fake_gui):
+    pytest.importorskip("imageio.v3")
     viewer = Viewer()
     exporter = viewer_3d.AnimationExporter(viewer, tmp_path)
     exporter.start_turntable_export("rotation.gif", 3, 150)
@@ -436,7 +437,7 @@ def test_turntable_gif_retains_canvas_and_millisecond_timing(tmp_path, fake_gui)
 
 
 def test_failed_animation_encoding_restores_view_and_preserves_output(tmp_path, fake_gui, monkeypatch):
-    import imageio.v3
+    imageio_v3 = pytest.importorskip("imageio.v3")
 
     viewer = Viewer()
     exporter = viewer_3d.AnimationExporter(viewer, tmp_path)
@@ -448,7 +449,7 @@ def test_failed_animation_encoding_restores_view_and_preserves_output(tmp_path, 
     def fail(*args, **kwargs):
         raise RuntimeError("encoder failed")
 
-    monkeypatch.setattr(imageio.v3, "imwrite", fail)
+    monkeypatch.setattr(imageio_v3, "imwrite", fail)
     with pytest.raises(RuntimeError, match="encoder failed"):
         exporter.finish_export()
     assert output.read_bytes() == b"previous animation"
