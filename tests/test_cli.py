@@ -1,6 +1,7 @@
 import os
 import subprocess
 import sys
+import sysconfig
 from importlib.metadata import version
 from pathlib import Path
 
@@ -116,7 +117,7 @@ def test_full_help_shows_version_and_export_selection(cli, capsys):
 def test_installed_module_and_console_entrypoints(make_tcf, tmp_path):
     source = make_tcf(scalar_attrs=True)
     environment = dict(os.environ, PYTHONIOENCODING="utf-8", MPLBACKEND="Agg")
-    console = Path(sys.executable).parent / ("tomocube.exe" if os.name == "nt" else "tomocube")
+    console = Path(sysconfig.get_path("scripts")) / ("tomocube.exe" if os.name == "nt" else "tomocube")
     for command in (
         [sys.executable, "-m", "tomocube", "info", str(source)],
         [str(console), "--version"],
