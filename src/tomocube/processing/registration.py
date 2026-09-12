@@ -2,7 +2,7 @@
 
 Voxel centers are at index * spacing. XY volumes align at their geometric
 centers, rotate in physical YX coordinates, then translate in HT micrometers.
-Exports and the 2D viewers share this inverse mapping.
+Exports and all viewers share this mapping.
 """
 from __future__ import annotations
 
@@ -106,7 +106,7 @@ class FluorescenceRegistration:
 
     def __init__(self, fl_data: np.ndarray, ht_shape: tuple[int, int, int],
                  params: RegistrationParams | None = None, channel: str | None = None,
-                 z_offset_mode: str = "start"):
+                 z_offset_mode: str = "start", *, translation_um=(0, 0, 0)):
         params = params or RegistrationParams()
         self.data, self.matrix, self.offset = _prepare_registration(
             fl_data, ht_shape, params, channel, z_offset_mode,
@@ -115,6 +115,24 @@ class FluorescenceRegistration:
             raise ValueError("Plane sampling requires a 3D fluorescence volume")
         self.ht_shape = tuple(ht_shape)
         self.fl_res_z = params.fl_res_z
+        self.ht_spacing = np.array([params.ht_res_z, params.ht_res_y, params.ht_res_x])
+        translation = np.asarray(translation_um, dtype=float)
+        if translation.shape != (3,) or not np.isfinite(translation).all():
+            raise ValueError("translation_um must contain three finite ZYX micrometer values")
+        self.offset = self.offset - self.matrix @ (translation / self.ht_spacing)
+
+    @property
+    def voxel_to_world(self) -> np.ndarray:
+        """Native FL ZYX indices to HT-world ZYX micrometers (4x4 affine).
+
+        This is the forward form of the sampler's inverse mapping. A viewer
+        can place original FL voxels without allocating a resampled volume.
+        """
+        linear = np.diag(self.ht_spacing) @ np.linalg.inv(self.matrix)
+        affine = np.eye(4)
+        affine[:3, :3] = linear
+        affine[:3, 3] = -linear @ self.offset
+        return affine
 
     def sample_plane(self, axis: int, index: int, z_offset_um: float = 0) -> tuple[np.ndarray, bool]:
         """Return a float32 HT plane (axis 0/1/2 = XY/XZ/YZ) and overlap flag.
@@ -142,6 +160,8 @@ def register_fl_to_ht(
     params: RegistrationParams | None = None,
     channel: str | None = None,
     z_offset_mode: str = "start",
+    *,
+    translation_um=(0, 0, 0),
 ) -> np.ndarray:
     """Register 2D/3D FL to the matching HT shape using linear sampling.
 
@@ -155,11 +175,15 @@ def register_fl_to_ht(
     """
     params = params or RegistrationParams()
     if np.ndim(fl_data) == 2:
+        if np.any(np.asarray(translation_um) != 0):
+            raise ValueError("Residual translation requires a 3D fluorescence volume")
         data, matrix, offset = _prepare_registration(fl_data, ht_shape, params, channel, z_offset_mode)
         grid = np.indices(ht_shape, dtype=np.float64)
         coordinates = np.einsum("ij,jhw->ihw", matrix, grid) + offset[:, None, None]
         return _sample_coordinates(data, coordinates)[0]
-    registration = FluorescenceRegistration(fl_data, ht_shape, params, channel, z_offset_mode)
+    registration = FluorescenceRegistration(
+        fl_data, ht_shape, params, channel, z_offset_mode, translation_um=translation_um,
+    )
     output = np.empty(ht_shape, dtype=np.float32)
     for z in range(ht_shape[0]):
         output[z] = registration.sample_plane(0, z)[0]

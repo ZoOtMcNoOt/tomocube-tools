@@ -383,42 +383,83 @@ def extract_line_profile(
     data: np.ndarray,
     p1: tuple[float, float],
     p2: tuple[float, float],
-    res_xy: float,
+    spacing: float | tuple[float, float],
     num_points: int | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """
-    Extract intensity profile along a line.
+    """Sample a line between physical XY voxel-center coordinates.
 
     Args:
-        data: 2D image data
-        p1: Start point in physical coordinates (um)
-        p2: End point in physical coordinates (um)
-        res_xy: Resolution in um/pixel
-        num_points: Number of sample points (default: pixel distance)
+        data: Non-empty finite real 2D image in YX order.
+        p1: Start point (x, y) in micrometers, within the image's voxel centers.
+        p2: End point (x, y) in micrometers, within the image's voxel centers.
+        spacing: Positive finite spacing in micrometers, either a scalar for
+            equal axes or independent (y, x) spacing matching the array order.
+        num_points: Integer count of at least two, including both endpoints.
+            The default gives intervals no longer than one pixel in index space.
 
     Returns:
-        (distances, values): Arrays of distance from p1 and corresponding values
+        Distances in micrometers from p1 and linearly interpolated float64 values.
+        Coincident endpoints return repeated samples at distance zero.
+
+    Raises:
+        ValueError: Data, calibration, physical endpoints, or sample count are invalid.
     """
+    import operator
+
     from scipy.ndimage import map_coordinates
 
-    # Convert to pixel coordinates
-    x1, y1 = p1[0] / res_xy, p1[1] / res_xy
-    x2, y2 = p2[0] / res_xy, p2[1] / res_xy
+    data = np.asarray(data)
+    if data.ndim != 2 or 0 in data.shape or data.dtype.kind not in "iuf":
+        raise ValueError("data must be a non-empty real numeric 2D array in YX order")
+    with np.errstate(over="ignore", invalid="ignore"):
+        data = data.astype(np.float64, copy=False)
+    if not np.isfinite(data).all():
+        raise ValueError("data must contain finite values representable as float64")
 
-    # Calculate number of points
-    pixel_dist = np.sqrt((x2 - x1)**2 + (y2 - y1)**2)
+    spacing_yx = np.asarray(spacing)
+    if spacing_yx.ndim == 0:
+        spacing_yx = np.repeat(spacing_yx, 2)
+    if spacing_yx.shape != (2,) or spacing_yx.dtype.kind not in "iuf":
+        raise ValueError("spacing must be a positive finite scalar or (y, x) pair")
+    with np.errstate(over="ignore", invalid="ignore"):
+        spacing_yx = spacing_yx.astype(np.float64)
+    if not np.isfinite(spacing_yx).all() or (spacing_yx <= 0).any():
+        raise ValueError("spacing must be a positive finite scalar or (y, x) pair")
+
+    points = np.asarray([p1, p2])
+    if points.shape != (2, 2) or points.dtype.kind not in "iuf":
+        raise ValueError("p1 and p2 must be finite (x, y) physical coordinates")
+    with np.errstate(over="ignore", invalid="ignore"):
+        points = points.astype(np.float64)
+    if not np.isfinite(points).all():
+        raise ValueError("p1 and p2 must be finite (x, y) physical coordinates")
+    with np.errstate(over="ignore"):
+        extent_xy = (np.asarray(data.shape[::-1]) - 1) * spacing_yx[::-1]
+    if not np.isfinite(extent_xy).all():
+        raise ValueError("calibrated image extent must be finite")
+    if (points < 0).any() or (points > extent_xy).any():
+        raise ValueError("physical endpoints must lie within the image's voxel centers")
+    # Clamp roundoff at the final voxel center after physical bounds validation.
+    pixels = np.clip(points / spacing_yx[::-1], 0, np.asarray(data.shape[::-1]) - 1)
+
     if num_points is None:
-        num_points = max(2, int(pixel_dist))
+        pixel_distance = np.hypot(*(pixels[1] - pixels[0]))
+        num_points = max(2, int(np.ceil(pixel_distance)) + 1)
+    else:
+        if isinstance(num_points, (bool, np.bool_)):
+            raise ValueError("num_points must be an integer of at least two")
+        try:
+            num_points = operator.index(num_points)
+        except TypeError as error:
+            raise ValueError("num_points must be an integer of at least two") from error
+        if num_points < 2:
+            raise ValueError("num_points must be an integer of at least two")
 
-    # Sample along line
-    xs = np.linspace(x1, x2, num_points)
-    ys = np.linspace(y1, y2, num_points)
-
-    # Extract values using interpolation
-    values = map_coordinates(data, [ys, xs], order=1)
-
-    # Calculate physical distances
-    physical_dist = np.sqrt((p2[0] - p1[0])**2 + (p2[1] - p1[1])**2)
-    distances = np.linspace(0, physical_dist, num_points)
-
+    sample_xy = np.linspace(pixels[0], pixels[1], num_points)
+    values = map_coordinates(data, sample_xy.T[::-1], order=1, mode="nearest", prefilter=False)
+    with np.errstate(over="ignore"):
+        physical_distance = np.hypot(*(points[1] - points[0]))
+    if not np.isfinite(physical_distance):
+        raise ValueError("physical line length must be finite")
+    distances = np.linspace(0, physical_distance, num_points)
     return distances, values

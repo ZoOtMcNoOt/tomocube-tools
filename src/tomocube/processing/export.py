@@ -1,466 +1,257 @@
-"""
-TCF Export - Convert TCF files to various formats.
-
-Supported formats:
-    - TIFF stack (multi-page TIFF, 16-bit or 32-bit)
-    - MAT file (MATLAB .mat format)
-    - GIF animation (Z-stack or time-lapse)
-    - PNG sequence (individual slices)
-"""
-
+"""Scientific volume exports and display images from loaded acquisitions."""
 from __future__ import annotations
 
+from dataclasses import asdict
+import json
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 import numpy as np
 
 from tomocube.processing.image import normalize_with_bounds
+from tomocube.processing.outputs import atomic_output, new_output_directory
+from tomocube.processing.registration import FluorescenceRegistration
 
-if TYPE_CHECKING:
-    from tomocube.core.file import TCFFileLoader
 
-
-def _gif_duration(fps: int) -> int:
-    """Validate the rate and round to GIF's 10 ms frame duration units."""
+def _gif_duration(fps):
     if not np.isfinite(fps) or not 0 < fps <= 100:
         raise ValueError("fps must be greater than 0 and at most 100")
     return max(10, round(100 / fps) * 10)
 
 
-def export_to_tiff(
-    loader: TCFFileLoader,
-    output_path: str | Path,
-    channel: str = "ht",
-    bit_depth: int = 16,
-    normalize: bool = True,
-    compression: str = "lzw",
-) -> Path:
+def _output_path(path, suffix, alternatives=()):
+    path = Path(path)
+    return path if path.suffix.lower() in (suffix, *alternatives) else path.with_suffix(suffix)
+
+
+def _source_data(loader, channel):
+    if channel.lower() == "ht":
+        data, spacing = loader.data_3d, loader.tcf_info.ht_resolution
+    else:
+        if channel not in loader.fl_data:
+            raise ValueError(f"FL channel {channel!r} not found. Available: {list(loader.fl_data)}")
+        data, spacing = loader.fl_data[channel], loader.tcf_info.fl_resolution
+    if data.dtype.kind not in "iuf" or not np.isfinite(data).all():
+        raise ValueError("Export requires finite real intensities")
+    return data, spacing
+
+
+def _registration(loader, channel, z_offset_mode, registration_path):
+    if channel.lower() == "ht":
+        raise ValueError("Registration requires a fluorescence channel")
+    data, _ = _source_data(loader, channel)
+    translation = (0, 0, 0)
+    estimated = None
+    if registration_path is not None:
+        from tomocube.processing.alignment import load_alignment
+        alignment = load_alignment(registration_path, loader, channel)
+        z_offset_mode, translation = alignment.z_offset_mode, alignment.translation_um
+        estimated = asdict(alignment)
+    mapping = FluorescenceRegistration(data, loader.data_3d.shape, loader.reg_params,
+                                       channel, z_offset_mode, translation_um=translation)
+    provenance = {"axis_order": "ZYX", "length_unit": "um", "z_offset_mode": z_offset_mode,
+                  "interpolation": "linear; zero outside native voxel centers",
+                  "voxel_to_world": mapping.voxel_to_world.tolist(),
+                  "original_calibration": asdict(loader.reg_params)}
+    if estimated is not None:
+        provenance["estimate"] = estimated
+    return mapping, provenance
+
+
+def _volume(loader, channel, registered, z_offset_mode, registration_path):
+    data, spacing = _source_data(loader, channel)
+    provenance = None
+    if registered or registration_path is not None:
+        mapping, provenance = _registration(loader, channel, z_offset_mode, registration_path)
+        data = np.empty(mapping.ht_shape, dtype=np.float32)
+        for z in range(mapping.ht_shape[0]):
+            data[z] = mapping.sample_plane(0, z)[0]
+        spacing = loader.tcf_info.ht_resolution
+    return data, spacing, provenance
+
+
+def _range(data, vmin=None, vmax=None):
+    if vmin is None or vmax is None:
+        low, high = np.percentile(data, [1, 99])
+        vmin = low if vmin is None else vmin
+        vmax = high if vmax is None else vmax
+    if not np.isfinite([vmin, vmax]).all() or vmin > vmax:
+        raise ValueError("Display bounds must be finite with vmin <= vmax")
+    return vmin, vmax
+
+
+def export_to_tiff(loader, output_path, channel="ht", bit_depth=32, normalize=False,
+                   compression="lzw", *, registered=False, z_offset_mode="start",
+                   registration_path=None) -> Path:
+    """Export native or registered ZYX data with independent XYZ calibration.
+
+    API and CLI default to unnormalized float32 values. Registration applies
+    only to FL and places it on the HT grid; its original calibration and full
+    affine are included in the ImageJ Info JSON. A saved report implies
+    registered=True. Sixteen-bit display output requires normalize=True.
     """
-    Export TCF data to a multi-page TIFF stack.
-
-    Args:
-        loader: TCFFileLoader with loaded data
-        output_path: Output file path (will add .tiff if needed)
-        channel: "ht" for holotomography, or FL channel name like "CH0"
-        bit_depth: 16 or 32 bit output
-        normalize: If True, normalize to full bit range (good for visualization).
-                   If False with 32-bit, preserves physical RI values.
-        compression: TIFF compression ("lzw", "zlib", "none")
-
-    Returns:
-        Path to the saved TIFF file
-
-    Note:
-        For HT data, physical RI values (e.g., 1.33-1.40) are preserved when
-        using bit_depth=32 with normalize=False. This is recommended for
-        scientific analysis. For 16-bit output, normalization is required
-        to map values to the 0-65535 range.
-    """
-    try:
-        import tifffile
-    except ImportError:
-        raise ImportError("tifffile package required: pip install tifffile")
-
-    output_path = Path(output_path)
-    if not output_path.suffix.lower() in (".tif", ".tiff"):
-        output_path = output_path.with_suffix(".tiff")
+    import tifffile
 
     if bit_depth not in (16, 32):
-        raise ValueError(f"bit_depth must be 16 or 32, got {bit_depth}")
+        raise ValueError("bit_depth must be 16 or 32")
     if bit_depth == 16 and not normalize:
         raise ValueError("16-bit TIFF output requires normalize=True; use 32-bit to preserve values")
-    compression_map = {"lzw": "lzw", "zlib": "zlib", "none": None}
-    if compression not in compression_map:
-        raise ValueError(f"compression must be one of {list(compression_map)}, got {compression!r}")
-
-    # Get data (already in physical RI units for HT)
-    if channel.lower() == "ht":
-        data = loader.data_3d
-        description = f"HT data from {loader.tcf_path.name} (RI values)"
+    compressions = {"lzw": "lzw", "zlib": "zlib", "none": None}
+    if compression not in compressions:
+        raise ValueError(f"compression must be one of {list(compressions)}")
+    output_path = _output_path(output_path, ".tiff", (".tif",))
+    data, spacing, registration = _volume(loader, channel, registered, z_offset_mode, registration_path)
+    metadata = {"source": loader.tcf_path.name, "timepoint": loader.current_timepoint,
+                "channel": channel, "axis_order": "ZYX", "spacing_zyx_um": list(spacing),
+                "value_unit": "RI" if channel.lower() == "ht" else "fluorescence intensity",
+                "normalized": bool(normalize)}
+    if normalize:
+        low, high = np.percentile(data, [0.1, 99.9])
+        data_out = normalize_with_bounds(data, low, high)
+        metadata["original_range"] = [float(low), float(high)]
+        data_out = ((data_out * 65535).astype(np.uint16) if bit_depth == 16
+                    else data_out.astype(np.float32))
     else:
-        if channel not in loader.fl_data:
-            raise ValueError(f"FL channel '{channel}' not found. Available: {list(loader.fl_data.keys())}")
-        data = loader.fl_data[channel]
-        description = f"FL {channel} from {loader.tcf_path.name}"
-
-    description += f"; timepoint {loader.current_timepoint}"
-
-    # Handle conversion based on bit depth and normalization
-    if bit_depth == 32:
-        if normalize:
-            # 32-bit normalized (0-1 range)
-            vmin, vmax = np.percentile(data, [0.1, 99.9])
-            data_out = normalize_with_bounds(data, vmin, vmax).astype(np.float32)
-            description += f" [normalized 0-1, original range {vmin:.4f}-{vmax:.4f}]"
-        else:
-            # 32-bit preserving physical values (recommended for scientific use)
-            data_out = data.astype(np.float32)
-            units = "physical RI" if channel.lower() == "ht" else "fluorescence intensity"
-            description += f" [{units}, range {data.min():.4f}-{data.max():.4f}]"
-    elif bit_depth == 16:
-        # 16-bit always requires normalization to map to 0-65535
-        vmin, vmax = np.percentile(data, [0.1, 99.9])
-        data_norm = normalize_with_bounds(data, vmin, vmax)
-        data_out = (data_norm * 65535).astype(np.uint16)
-        description += f" [normalized, original range {vmin:.4f}-{vmax:.4f}]"
-
-    # Get resolution for metadata
-    res_z, res_y, res_x = (
-        loader.tcf_info.ht_resolution if channel.lower() == "ht" else loader.tcf_info.fl_resolution
-    )
-
-    # Save with ImageJ-compatible metadata
-    tifffile.imwrite(
-        output_path,
-        data_out,
-        imagej=True,
-        compression=compression_map[compression],
-        metadata={
-            "axes": "ZYX",
-            "unit": "um",
-            "spacing": res_z,
-            "Info": description,
-        },
-        resolution=(1 / res_x, 1 / res_y),
-        resolutionunit="NONE",
-    )
-
+        limit = np.finfo(np.float32).max
+        if data.max() > limit or data.min() < -limit:
+            raise ValueError("Intensities cannot be represented as float32")
+        data_out = data.astype(np.float32, copy=False)
+    if registration is not None:
+        metadata["registration"] = registration
+    z, y, x = spacing
+    sources = [loader.tcf_path] + ([registration_path] if registration_path is not None else [])
+    with atomic_output(output_path, sources=sources) as temporary:
+        tifffile.imwrite(temporary, data_out, imagej=True, compression=compressions[compression],
+                         metadata={"axes": "ZYX", "unit": "um", "spacing": z,
+                                   "Info": json.dumps(metadata, allow_nan=False)},
+                         resolution=(1 / x, 1 / y), resolutionunit="NONE")
     return output_path
 
 
-def export_to_mat(
-    loader: TCFFileLoader,
-    output_path: str | Path,
-    include_fl: bool = True,
-    include_metadata: bool = True,
-) -> Path:
+def export_to_mat(loader, output_path, include_fl=True, include_metadata=True, *,
+                  fl_channel=None, registered=False, z_offset_mode="start", registration_path=None) -> Path:
+    """Export physical RI and native FL, optionally adding one registered FL.
+
+    Registered data is a separate fl_<channel>_registered variable; native
+    fluorescence and calibration remain available for reproducible analysis.
     """
-    Export TCF data to MATLAB .mat format.
+    from scipy.io import savemat
 
-    Args:
-        loader: TCFFileLoader with loaded data
-        output_path: Output file path (will add .mat if needed)
-        include_fl: Include fluorescence data if available
-        include_metadata: Include resolution and file metadata
-
-    Returns:
-        Path to the saved MAT file
-
-    Note:
-        HT data is stored in physical refractive index units (e.g., 1.33-1.40).
-        Resolution values are in micrometers (μm).
-
-    Variables saved:
-        - ht_3d: 3D HT volume (Z, Y, X) in physical RI units
-        - ht_mip: Maximum intensity projection
-        - fl_ch0, fl_ch1, ...: FL channels (if include_fl=True)
-        - metadata: File info (if include_metadata=True)
-        - resolution: Spatial resolution in μm (if include_metadata=True)
-    """
-    try:
-        from scipy.io import savemat
-    except ImportError:
-        raise ImportError("scipy package required: pip install scipy")
-
-    output_path = Path(output_path)
-    if output_path.suffix.lower() != ".mat":
-        output_path = output_path.with_suffix(".mat")
-
-    # Build data dictionary
-    # HT data is already in physical RI units (e.g., 1.3300 not 13300)
-    mat_dict = {
-        "ht_3d": loader.data_3d,
-        "ht_mip": loader.data_mip,
-    }
-
-    # Add FL data
-    if include_fl and loader.has_fluorescence:
-        for ch_name, ch_data in loader.fl_data.items():
-            mat_dict[f"fl_{ch_name.lower()}"] = ch_data
-
-    # Add metadata
+    if (registered or registration_path is not None) and (not include_fl or fl_channel is None):
+        raise ValueError("Registered MAT export requires include_fl=True and fl_channel")
+    if fl_channel is not None and not include_fl:
+        raise ValueError("fl_channel requires include_fl=True")
+    if fl_channel is not None and fl_channel not in loader.fl_data:
+        raise ValueError(f"FL channel {fl_channel!r} not found")
+    if not np.isfinite(loader.data_mip).all():
+        raise ValueError("MAT export requires a finite HT projection")
+    output_path = _output_path(output_path, ".mat")
+    data = {"ht_3d": _source_data(loader, "ht")[0], "ht_mip": loader.data_mip}
+    if include_fl:
+        for channel in ([fl_channel] if fl_channel is not None else loader.fl_data):
+            data[f"fl_{channel.lower()}"] = _source_data(loader, channel)[0]
+    if registered or registration_path is not None:
+        volume, _, registration = _volume(loader, fl_channel, True, z_offset_mode, registration_path)
+        data[f"fl_{fl_channel.lower()}_registered"] = volume
+        data["registration_json"] = json.dumps(registration, allow_nan=False)
     if include_metadata:
-        info = loader.tcf_info
-        params = loader.reg_params
-        metadata = {
-            "filename": str(loader.tcf_path.name),
-            "timepoint": loader.current_timepoint,
-            "ht_shape": loader.data_3d.shape,
-            "ht_resolution_um": info.ht_resolution,
-            "magnification": info.magnification,
-            "numerical_aperture": info.numerical_aperture,
-            "medium_ri": info.medium_ri,
-            "has_fluorescence": info.has_fluorescence,
-        }
-        # MATLAB structs cannot encode Python None. Omit unavailable values
-        # rather than inventing optical parameters for incomplete metadata.
-        mat_dict["metadata"] = {key: value for key, value in metadata.items() if value is not None}
-        mat_dict["resolution"] = {
-            "ht_res_x_um": params.ht_res_x,
-            "ht_res_y_um": params.ht_res_y,
-            "ht_res_z_um": params.ht_res_z,
-            "fl_res_x_um": params.fl_res_x,
-            "fl_res_y_um": params.fl_res_y,
-            "fl_res_z_um": params.fl_res_z,
-            "fl_offset_z_um": params.fl_offset_z,
-        }
-
-    savemat(output_path, mat_dict, do_compression=True)
+        info, params = loader.tcf_info, loader.reg_params
+        metadata = {"filename": loader.tcf_path.name, "timepoint": loader.current_timepoint,
+                    "ht_shape": loader.data_3d.shape, "ht_resolution_um": info.ht_resolution,
+                    "magnification": info.magnification, "numerical_aperture": info.numerical_aperture,
+                    "medium_ri": info.medium_ri, "has_fluorescence": bool(loader.fl_data)}
+        data["metadata"] = {key: value for key, value in metadata.items() if value is not None}
+        data["resolution"] = {f"{modality}_res_{axis}_um": getattr(params, f"{modality}_res_{axis}")
+                              for modality in ("ht", "fl") for axis in "xyz"}
+        data["resolution"]["fl_offset_z_um"] = params.fl_offset_z
+        data["calibration_json"] = json.dumps(asdict(params), allow_nan=False)
+    sources = [loader.tcf_path] + ([registration_path] if registration_path is not None else [])
+    with atomic_output(output_path, sources=sources) as temporary:
+        savemat(temporary, data, do_compression=True, appendmat=False)
     return output_path
 
 
-def export_to_png_sequence(
-    loader: TCFFileLoader,
-    output_dir: str | Path,
-    channel: str = "ht",
-    prefix: str = "",
-    cmap: str = "gray",
-    vmin: float | None = None,
-    vmax: float | None = None,
-) -> list[Path]:
-    """
-    Export TCF data as a sequence of PNG images.
+def export_to_png_sequence(loader, output_dir, channel="ht", prefix="", cmap="gray",
+                           vmin=None, vmax=None, *, registered=False, z_offset_mode="start",
+                           registration_path=None) -> list[Path]:
+    """Publish a complete display sequence into a new or empty directory."""
+    from matplotlib import colormaps, pyplot as plt
 
-    Args:
-        loader: TCFFileLoader with loaded data
-        output_dir: Output directory
-        channel: "ht" for holotomography, or FL channel name
-        prefix: Filename prefix (default: use channel name)
-        cmap: Matplotlib colormap name
-        vmin, vmax: Value range for normalization
-
-    Returns:
-        List of paths to saved PNG files
-    """
-    import matplotlib.pyplot as plt
-
-    output_dir = Path(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    if channel.lower() == "ht":
-        data = loader.data_3d
-        prefix = prefix or "ht"
-    else:
-        if channel not in loader.fl_data:
-            raise ValueError(f"FL channel '{channel}' not found")
-        data = loader.fl_data[channel]
-        prefix = prefix or f"fl_{channel.lower()}"
-
-    if vmin is None or vmax is None:
-        p_vmin, p_vmax = np.percentile(data, [1, 99])
-        vmin = vmin if vmin is not None else p_vmin
-        vmax = vmax if vmax is not None else p_vmax
-
-    saved_files = []
-    for z in range(data.shape[0]):
-        filename = output_dir / f"{prefix}_{z:04d}.png"
-        plt.imsave(filename, data[z], cmap=cmap, vmin=vmin, vmax=vmax)
-        saved_files.append(filename)
-
-    return saved_files
+    colormaps[cmap]
+    prefix = prefix or ("ht" if channel.lower() == "ht" else f"fl_{channel.lower()}")
+    if Path(prefix).name != prefix or any(c in prefix for c in '/\\:') or prefix in (".", ".."):
+        raise ValueError("prefix must be a filename component, without path separators")
+    data, _, _ = _volume(loader, channel, registered, z_offset_mode, registration_path)
+    vmin, vmax = _range(data, vmin, vmax)
+    saved = []
+    with new_output_directory(output_dir) as temporary:
+        for z, plane in enumerate(data):
+            name = f"{prefix}_{z:04d}.png"
+            plt.imsave(temporary / name, plane, cmap=cmap, vmin=vmin, vmax=vmax)
+            saved.append(Path(output_dir) / name)
+    return saved
 
 
-def export_to_gif(
-    loader: TCFFileLoader,
-    output_path: str | Path,
-    channel: str = "ht",
-    axis: str = "z",
-    fps: int = 10,
-    cmap: str = "gray",
-    vmin: float | None = None,
-    vmax: float | None = None,
-    loop: int = 0,
-) -> Path:
-    """
-    Export TCF data as an animated GIF.
+def _axis(axis):
+    if not isinstance(axis, str) or axis.lower() not in ("z", "y", "x"):
+        raise ValueError("axis must be 'z', 'y', or 'x'")
+    return "zyx".index(axis.lower())
 
-    Args:
-        loader: TCFFileLoader with loaded data
-        output_path: Output file path
-        channel: "ht" for holotomography, or FL channel name
-        axis: Animation axis ("z", "y", or "x")
-        fps: Frames per second, greater than 0 and at most 100 (rounded to 10 ms)
-        cmap: Matplotlib colormap name
-        vmin, vmax: Value range for normalization
-        loop: Number of loops (0 = infinite)
 
-    Returns:
-        Path to the saved GIF file
-    """
-    try:
-        from PIL import Image
-    except ImportError:
-        raise ImportError("Pillow package required: pip install Pillow")
+def _save_gif(frames, path, duration, loop, sources):
+    if not isinstance(loop, (int, np.integer)) or isinstance(loop, bool) or loop < 0:
+        raise ValueError("loop must be a nonnegative integer")
+    frames = iter(frames)
+    first = next(frames)
+    with atomic_output(path, sources=sources) as temporary:
+        first.save(temporary, save_all=True, append_images=frames, duration=duration,
+                   loop=loop, optimize=True)
+    return path
 
+
+def export_to_gif(loader, output_path, channel="ht", axis="z", fps=10, cmap="gray",
+                   vmin=None, vmax=None, loop=0, *, registered=False, z_offset_mode="start",
+                   registration_path=None) -> Path:
+    """Export a display animation along the selected axis."""
+    from PIL import Image
     from matplotlib import colormaps
 
-    duration_ms = _gif_duration(fps)
-
-    output_path = Path(output_path)
-    if output_path.suffix.lower() != ".gif":
-        output_path = output_path.with_suffix(".gif")
-
-    if channel.lower() == "ht":
-        data = loader.data_3d
-    else:
-        if channel not in loader.fl_data:
-            raise ValueError(f"FL channel '{channel}' not found")
-        data = loader.fl_data[channel]
-
-    # Get slices along the specified axis
-    if axis.lower() == "z":
-        slices = [data[i] for i in range(data.shape[0])]
-    elif axis.lower() == "y":
-        slices = [data[:, i, :] for i in range(data.shape[1])]
-    elif axis.lower() == "x":
-        slices = [data[:, :, i] for i in range(data.shape[2])]
-    else:
-        raise ValueError(f"axis must be 'z', 'y', or 'x', got '{axis}'")
-
-    if vmin is None or vmax is None:
-        p_vmin, p_vmax = np.percentile(data, [1, 99])
-        vmin = vmin if vmin is not None else p_vmin
-        vmax = vmax if vmax is not None else p_vmax
-
-    # Convert to images
+    duration, dimension = _gif_duration(fps), _axis(axis)
     colormap = colormaps[cmap]
-    frames = []
-    for slice_data in slices:
-        normalized = normalize_with_bounds(slice_data, vmin, vmax)
-        colored = (colormap(normalized)[:, :, :3] * 255).astype(np.uint8)
-        frames.append(Image.fromarray(colored))
-
-    # Save GIF
-    frames[0].save(
-        output_path,
-        save_all=True,
-        append_images=frames[1:],
-        duration=duration_ms,
-        loop=loop,
-        optimize=True,
-    )
-
-    return output_path
+    data, _, _ = _volume(loader, channel, registered, z_offset_mode, registration_path)
+    vmin, vmax = _range(data, vmin, vmax)
+    def frames():
+        for index in range(data.shape[dimension]):
+            normalized = normalize_with_bounds(np.take(data, index, axis=dimension), vmin, vmax)
+            yield Image.fromarray((colormap(normalized)[..., :3] * 255).astype(np.uint8))
+    sources = [loader.tcf_path] + ([registration_path] if registration_path is not None else [])
+    return _save_gif(frames(), _output_path(output_path, ".gif"), duration, loop, sources)
 
 
-def export_overlay_gif(
-    loader: TCFFileLoader,
-    output_path: str | Path,
-    fl_channel: str = "CH0",
-    axis: str = "z",
-    fps: int = 10,
-    fl_alpha: float = 0.5,
-    ht_cmap: str = "gray",
-    loop: int = 0,
-    z_offset_mode: str = "start",
-) -> Path:
+def export_overlay_gif(loader, output_path, fl_channel="CH0", axis="z", fps=10,
+                       fl_alpha=0.5, ht_cmap="gray", loop=0, z_offset_mode="start", *,
+                       registration_path=None) -> Path:
+    """Export calibrated HT+FL planes without an extra registered 3D volume.
+
+    FL uses the same native positive-intensity contrast suggestion as the 2D
+    viewers. A saved report supplies its own base mode and residual translation.
     """
-    Export HT + FL overlay as an animated GIF.
-
-    Args:
-        loader: TCFFileLoader with loaded data
-        output_path: Output file path
-        fl_channel: FL channel name
-        axis: Animation axis ("z", "y", or "x")
-        fps: Frames per second, greater than 0 and at most 100 (rounded to 10 ms)
-        fl_alpha: FL overlay alpha (0-1)
-        ht_cmap: Colormap for HT
-        loop: Number of loops (0 = infinite)
-        z_offset_mode: How to interpret fl_offset_z:
-            - "start": OffsetZ is HT Z position where FL slice 0 starts (default)
-            - "center": OffsetZ is HT Z position of FL volume center
-            - "auto": Center FL on HT volume, ignoring OffsetZ
-
-    Returns:
-        Path to the saved GIF file
-    """
-    try:
-        from PIL import Image
-    except ImportError:
-        raise ImportError("Pillow package required: pip install Pillow")
-
+    from PIL import Image
     from matplotlib import colormaps
 
-    from tomocube.processing.registration import register_fl_to_ht
-
-    duration_ms = _gif_duration(fps)
+    duration, dimension = _gif_duration(fps), _axis(axis)
     if not np.isfinite(fl_alpha) or not 0 <= fl_alpha <= 1:
         raise ValueError("fl_alpha must be between 0 and 1")
-    if z_offset_mode not in ("start", "center", "auto"):
-        raise ValueError("z_offset_mode must be 'start', 'center', or 'auto'")
-
-    output_path = Path(output_path)
-    if output_path.suffix.lower() != ".gif":
-        output_path = output_path.with_suffix(".gif")
-
-    if not loader.has_fluorescence:
-        raise ValueError("No fluorescence data available")
-    if fl_channel not in loader.fl_data:
-        raise ValueError(f"FL channel '{fl_channel}' not found")
-
-    ht_data = loader.data_3d
-    fl_raw = loader.fl_data[fl_channel]
-    fl_registered = register_fl_to_ht(
-        fl_raw, ht_data.shape, loader.reg_params,
-        channel=fl_channel, z_offset_mode=z_offset_mode
-    )
-
-    # Normalize
-    ht_vmin, ht_vmax = np.percentile(ht_data, [1, 99])
-    fl_nonzero = fl_registered[fl_registered > 0]
-    if len(fl_nonzero) > 0:
-        fl_vmin, fl_vmax = np.percentile(fl_nonzero, [1, 99])
-    else:
-        fl_vmin, fl_vmax = 0, 1
-
-    ht_cmap_obj = colormaps[ht_cmap]
-    frames = []
-
-    # Get number of slices based on axis
-    if axis.lower() == "z":
-        num_slices = ht_data.shape[0]
-    elif axis.lower() == "y":
-        num_slices = ht_data.shape[1]
-    elif axis.lower() == "x":
-        num_slices = ht_data.shape[2]
-    else:
-        raise ValueError(f"axis must be 'z', 'y', or 'x', got '{axis}'")
-
-    for i in range(num_slices):
-        # Get slices based on axis
-        if axis.lower() == "z":
-            ht_slice = ht_data[i]
-            fl_slice = fl_registered[i]
-        elif axis.lower() == "y":
-            ht_slice = ht_data[:, i, :]
-            fl_slice = fl_registered[:, i, :]
-        else:  # x
-            ht_slice = ht_data[:, :, i]
-            fl_slice = fl_registered[:, :, i]
-
-        # HT slice
-        ht_norm = normalize_with_bounds(ht_slice, ht_vmin, ht_vmax)
-        ht_rgb = ht_cmap_obj(ht_norm)[:, :, :3]
-
-        # FL slice (green overlay)
-        fl_norm = normalize_with_bounds(fl_slice, fl_vmin, fl_vmax)
-        fl_rgb = np.zeros((*fl_norm.shape, 3))
-        fl_rgb[:, :, 1] = fl_norm
-
-        # Blend
-        blended = ht_rgb * (1 - fl_alpha * fl_norm[:, :, np.newaxis]) + fl_rgb * fl_alpha
-
-        frame = (np.clip(blended, 0, 1) * 255).astype(np.uint8)
-        frames.append(Image.fromarray(frame))
-
-    frames[0].save(
-        output_path,
-        save_all=True,
-        append_images=frames[1:],
-        duration=duration_ms,
-        loop=loop,
-        optimize=True,
-    )
-
-    return output_path
+    colormap = colormaps[ht_cmap]
+    mapping, _ = _registration(loader, fl_channel, z_offset_mode, registration_path)
+    ht = _source_data(loader, "ht")[0]
+    low, high = _range(ht)
+    fl_low, fl_high = loader.get_fl_contrast(fl_channel)
+    def frames():
+        for index in range(ht.shape[dimension]):
+            ht_plane = normalize_with_bounds(np.take(ht, index, axis=dimension), low, high)
+            fl_plane = normalize_with_bounds(mapping.sample_plane(dimension, index)[0], fl_low, fl_high)
+            rgb = colormap(ht_plane)[..., :3] * (1 - fl_alpha * fl_plane[..., None])
+            rgb[..., 1] += fl_plane * fl_alpha
+            yield Image.fromarray((np.clip(rgb, 0, 1) * 255).astype(np.uint8))
+    sources = [loader.tcf_path] + ([registration_path] if registration_path is not None else [])
+    return _save_gif(frames(), _output_path(output_path, ".gif"), duration, loop, sources)
