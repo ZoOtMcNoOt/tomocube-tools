@@ -4,12 +4,11 @@
 Provides interactive 3D visualization using napari with:
 - Volume rendering (MIP, attenuated, etc.)
 - Multi-channel fluorescence overlay
-- XYZ range sliders for sub-volume cropping
+- XYZ range sliders for render-only 3D clipping
 - Layer controls with background removal
 - Camera presets for different viewing angles
 - Scale bar with physical units
 - Screenshot and animation export (GIF/MP4)
-- Performance optimization for large volumes (512^3+)
 
 Usage:
     python -m tomocube view3d sample.TCF
@@ -21,315 +20,188 @@ Keyboard shortcuts:
     R       Reset camera
     F       Fit view to data
     +/-     Zoom in/out
-    T       Start turntable animation export
-    2/3     Toggle 2D/3D view
 """
 
 from __future__ import annotations
 
-import logging
-import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING
 
 import numpy as np
 
-from tomocube.core.config import vprint, is_verbose
+from tomocube.processing.registration import FluorescenceRegistration, Z_OFFSET_MODES
+from tomocube.viewer.volume_geometry import VolumeGeometry, constrain_native_slicing, native_slice_conflicts
 
 if TYPE_CHECKING:
     from tomocube.core.file import TCFFileLoader
-
-logger = logging.getLogger(__name__)
-
 
 # =============================================================================
 # Animation Export
 # =============================================================================
 
 class AnimationExporter:
-    """
-    Export turntable and slice sweep animations as GIF or MP4.
-
-    IMPORTANT: All methods must be called from the main Qt thread since
-    napari's screenshot() requires OpenGL context on the main thread.
-    Use capture_frame() with QTimer for animation loops.
-    """
+    """Capture on the Qt thread and publish GIF/MP4 only when encoding succeeds."""
 
     def __init__(self, viewer, output_dir: Path):
         self.viewer = viewer
-        self.output_dir = output_dir
+        self.output_dir = Path(output_dir)
         self._is_exporting = False
-        self._frames: list = []
-        self._export_config: dict = {}
-        self._original_state: dict = {}
-
-    def start_turntable_export(
-        self,
-        filename: str,
-        n_frames: int,
-        duration_ms: int,
-    ) -> None:
-        """
-        Initialize turntable export state. Call capture_turntable_frame() repeatedly.
-        Must be called from main thread.
-        """
-        self._is_exporting = True
         self._frames = []
-        self._export_config = {
-            "mode": "turntable",
-            "filename": filename,
-            "n_frames": n_frames,
-            "duration_ms": duration_ms,
-            "current_frame": 0,
-        }
+        self._export_config = {}
+        self._original_state = {}
+
+    def _start(self, filename, duration_ms):
+        if self._is_exporting:
+            raise RuntimeError("An animation export is already running")
+        if Path(filename).suffix.lower() not in (".gif", ".mp4"):
+            raise ValueError("Animation filename must end in .gif or .mp4")
+        if not np.isscalar(duration_ms) or not np.isfinite(duration_ms) or duration_ms < 10:
+            raise ValueError("Frame duration must be at least 10 milliseconds")
+        self._export_config = {"filename": filename, "duration_ms": float(duration_ms),
+                               "current_frame": 0}
         self._original_state = {
             "angles": self.viewer.camera.angles,
+            "center": self.viewer.camera.center,
+            "zoom": self.viewer.camera.zoom,
+            "ndisplay": self.viewer.dims.ndisplay,
+            "point": tuple(self.viewer.dims.point),
+            "order": tuple(self.viewer.dims.order),
         }
-        # Ensure 3D mode
+        self._frames = []
+        self._is_exporting = True
+
+    def start_turntable_export(self, filename: str, n_frames: int, duration_ms: int) -> None:
+        if isinstance(n_frames, (bool, np.bool_)) or not isinstance(n_frames, (int, np.integer)) or n_frames <= 0:
+            raise ValueError("n_frames must be a positive integer")
+        self._start(filename, duration_ms)
+        self._export_config.update(mode="turntable", n_frames=n_frames)
         self.viewer.dims.ndisplay = 3
 
-    def capture_turntable_frame(self) -> tuple[int, int, bool]:
-        """
-        Capture one frame of turntable animation. Returns (current, total, done).
-        Must be called from main thread.
-        """
-        from qtpy.QtWidgets import QApplication
-
-        cfg = self._export_config
-        current = cfg["current_frame"]
-        n_frames = cfg["n_frames"]
-
-        if current >= n_frames:
-            return (current, n_frames, True)
-
-        # Calculate rotation angle
-        roll, pitch, yaw = self._original_state["angles"]
-        angle = yaw + (360 * current / n_frames)
-        self.viewer.camera.angles = (roll, pitch, angle)
-
-        # Process events to ensure render completes
-        QApplication.processEvents()
-
-        # Capture frame
-        frame = self.viewer.screenshot(canvas_only=True)
-        self._frames.append(frame)
-
-        cfg["current_frame"] = current + 1
-        done = cfg["current_frame"] >= n_frames
-
-        return (current + 1, n_frames, done)
-
-    def start_slice_sweep_export(
-        self,
-        filename: str,
-        axis: int,
-        duration_ms: int,
-    ) -> int:
-        """
-        Initialize slice sweep export. Returns total number of slices.
-        Must be called from main thread.
-        
-        Args:
-            axis: 0=Z, 1=Y, 2=X (napari dim order for 3D volume)
-        """
-        self._is_exporting = True
-        self._frames = []
-
-        n_slices = int(self.viewer.dims.range[axis][1])
-
-        self._export_config = {
-            "mode": "sweep",
-            "filename": filename,
-            "axis": axis,
-            "n_slices": n_slices,
-            "duration_ms": duration_ms,
-            "current_frame": 0,
-        }
-        self._original_state = {
-            "ndisplay": self.viewer.dims.ndisplay,
-            "point": list(self.viewer.dims.point),
-            "order": list(self.viewer.dims.order),
-        }
-        
-        # Switch to 2D mode and set the correct axis to be the sliced dimension
-        # In napari 2D mode, the first axis in `order` is the one being sliced
-        # Default order is (0, 1, 2) meaning Z is sliced. 
-        # For Y sweep, order should be (1, 0, 2) - Y is sliced, display ZX
-        # For X sweep, order should be (2, 0, 1) - X is sliced, display ZY
-        if axis == 0:  # Z sweep
-            new_order = (0, 1, 2)
-        elif axis == 1:  # Y sweep
-            new_order = (1, 0, 2)
-        else:  # X sweep (axis == 2)
-            new_order = (2, 0, 1)
-        
-        self.viewer.dims.order = new_order
+    def start_slice_sweep_export(self, filename: str, axis: int, duration_ms: int) -> int:
+        """Sweep actual napari world positions, including final/singleton samples."""
+        if isinstance(axis, (bool, np.bool_)) or axis not in (0, 1, 2):
+            raise ValueError("axis must be 0, 1 or 2")
+        conflicts = native_slice_conflicts(self.viewer, axis)
+        if conflicts:
+            raise ValueError(
+                "Native napari slicing cannot represent this plane for " + ", ".join(conflicts)
+                + ". Use the Tomocube slice viewer or GIF export for calibrated orthogonal planes."
+            )
+        n_slices = self.viewer.dims.nsteps[axis]
+        start, _, step = self.viewer.dims.range[axis]
+        self._start(filename, duration_ms)
+        self._export_config.update(mode="sweep", axis=axis, n_frames=n_slices,
+                                   start=start, step=step)
+        self.viewer.dims.order = (axis, *(i for i in range(3) if i != axis))
         self.viewer.dims.ndisplay = 2
-
         return n_slices
 
+    def capture_turntable_frame(self) -> tuple[int, int, bool]:
+        return self._capture_frame("turntable")
+
     def capture_sweep_frame(self) -> tuple[int, int, bool]:
-        """
-        Capture one frame of slice sweep animation. Returns (current, total, done).
-        Must be called from main thread.
-        """
-        from qtpy.QtWidgets import QApplication
+        return self._capture_frame("sweep")
 
+    def _capture_frame(self, mode):
+        if not self._is_exporting or self._export_config["mode"] != mode:
+            raise RuntimeError(f"No {mode} export is running")
         cfg = self._export_config
-        current = cfg["current_frame"]
-        n_slices = cfg["n_slices"]
-        axis = cfg["axis"]
-
-        if current >= n_slices:
-            return (current, n_slices, True)
-
-        # Set slice position
-        self.viewer.dims.set_point(axis, current)
-
-        # Process events to ensure render completes
+        current, count = cfg["current_frame"], cfg["n_frames"]
+        if current >= count:
+            return current, count, True
+        if mode == "turntable":
+            roll, pitch, yaw = self._original_state["angles"]
+            self.viewer.camera.angles = (roll, pitch, yaw + 360 * current / count)
+        else:
+            self.viewer.dims.set_point(cfg["axis"], cfg["start"] + current * cfg["step"])
+        from qtpy.QtWidgets import QApplication
         QApplication.processEvents()
-
-        # Capture frame
-        frame = self.viewer.screenshot(canvas_only=True)
-        self._frames.append(frame)
-
-        cfg["current_frame"] = current + 1
-        done = cfg["current_frame"] >= n_slices
-
-        return (current + 1, n_slices, done)
+        self._frames.append(self.viewer.screenshot(canvas_only=True))
+        cfg["current_frame"] += 1
+        return current + 1, count, current + 1 == count
 
     def finish_export(self) -> Path:
-        """
-        Save captured frames to file and restore viewer state.
-        Must be called from main thread.
-        """
-        import imageio.v3 as iio
+        """Retain the previous output and restore the view even on encoding failure."""
+        from tomocube.processing.outputs import atomic_output
 
         cfg = self._export_config
-        filename = cfg["filename"]
-        duration_ms = cfg["duration_ms"]
-
-        # Save animation
-        output_path = self.output_dir / filename
-
-        # Ensure all frames have the same shape (window might resize during capture)
-        if self._frames:
-            # First, normalize all frames to RGB (3 channels)
-            normalized_frames = []
-            for frame in self._frames:
-                if frame.ndim == 3 and frame.shape[2] == 4:
-                    # Convert RGBA to RGB
-                    frame = frame[:, :, :3].copy()
-                elif frame.ndim == 2:
-                    # Grayscale to RGB
-                    frame = np.stack([frame, frame, frame], axis=2)
+        if not self._is_exporting:
+            raise RuntimeError("No animation export is running")
+        try:
+            if len(self._frames) != cfg["n_frames"]:
+                raise ValueError("Animation capture is incomplete")
+            shape = self._frames[0].shape
+            if any(frame.shape != shape for frame in self._frames):
+                raise ValueError("Canvas size changed during capture; keep it fixed and export again")
+            frames = [frame[..., :3] for frame in self._frames]
+            output_path = self.output_dir / cfg["filename"]
+            sources = [layer.metadata[key] for layer in self.viewer.layers
+                       for key in ("source", "registration_path") if key in layer.metadata]
+            with atomic_output(output_path, sources=sources) as temporary:
+                if output_path.suffix.lower() == ".mp4":
+                    import imageio.v2 as iio
+                    # H.264 yuv420 needs even dimensions. Pad only the final
+                    # row/column, preserving screenshot pixels and scale bars.
+                    with iio.get_writer(temporary, format="FFMPEG",
+                                        fps=1000.0 / cfg["duration_ms"],
+                                        macro_block_size=1) as writer:
+                        for frame in frames:
+                            pad = ((0, frame.shape[0] % 2), (0, frame.shape[1] % 2), (0, 0))
+                            writer.append_data(np.pad(frame, pad))
                 else:
-                    frame = frame.copy()
-                normalized_frames.append(frame)
-            
-            # Find minimum dimensions across all frames
-            min_h = min(f.shape[0] for f in normalized_frames)
-            min_w = min(f.shape[1] for f in normalized_frames)
-            
-            # Ensure dimensions are divisible by 16 (required by h264 macro blocks)
-            min_h = (min_h // 16) * 16
-            min_w = (min_w // 16) * 16
-            
-            # Crop all frames to minimum dimensions
-            final_frames = []
-            for frame in normalized_frames:
-                cropped = frame[:min_h, :min_w, :3]
-                final_frames.append(cropped)
-            
-            # Stack into single array for imageio
-            self._frames = np.stack(final_frames, axis=0)
-
-        if filename.endswith('.mp4'):
-            # Use imageio-ffmpeg for MP4 export
-            fps = max(1, 1000 // duration_ms)
-            try:
-                iio.imwrite(
-                    str(output_path),
-                    self._frames,
-                    fps=fps,
-                    plugin="FFMPEG",
-                )
-            except Exception as e:
-                # Fallback to GIF if ffmpeg fails
-                print(f"Warning: MP4 encoding failed ({e})")
-                print("Saving as GIF instead...")
-                output_path = output_path.with_suffix('.gif')
-                cfg["filename"] = output_path.name
-                duration_sec = duration_ms / 1000.0
-                iio.imwrite(
-                    str(output_path),
-                    self._frames,
-                    duration=duration_sec,
-                    loop=0,
-                    plugin="pillow",
-                )
-        else:
-            # GIF export
-            duration_sec = duration_ms / 1000.0
-            iio.imwrite(
-                str(output_path),
-                self._frames,
-                duration=duration_sec,
-                loop=0,
-                plugin="pillow",
-            )
-
-        # Restore state
-        if cfg["mode"] == "turntable":
-            self.viewer.camera.angles = self._original_state["angles"]
-        else:
-            # Restore dims order first, then ndisplay and points
-            if "order" in self._original_state:
-                self.viewer.dims.order = tuple(self._original_state["order"])
-            self.viewer.dims.ndisplay = self._original_state["ndisplay"]
-            for ax, pt in enumerate(self._original_state["point"]):
-                self.viewer.dims.set_point(ax, pt)
-
-        self._is_exporting = False
-        self._frames = []
-
-        return output_path
+                    import imageio.v3 as iio
+                    iio.imwrite(temporary, frames, duration=cfg["duration_ms"],
+                                loop=0, plugin="pillow")
+            return output_path
+        finally:
+            self.cancel_export()
 
     def cancel_export(self) -> None:
-        """Cancel export and restore viewer state."""
         if not self._is_exporting:
             return
-
-        cfg = self._export_config
-        if cfg.get("mode") == "turntable":
-            self.viewer.camera.angles = self._original_state.get("angles", (0, -30, 45))
-        elif cfg.get("mode") == "sweep":
-            if "order" in self._original_state:
-                self.viewer.dims.order = tuple(self._original_state["order"])
-            self.viewer.dims.ndisplay = self._original_state.get("ndisplay", 3)
-            for ax, pt in enumerate(self._original_state.get("point", [])):
-                self.viewer.dims.set_point(ax, pt)
-
-        self._is_exporting = False
-        self._frames = []
+        try:
+            # Restore the axis order in 3D to avoid an unsupported intermediate
+            # rotated slice while switching back from a sweep.
+            self.viewer.dims.ndisplay = 3
+            self.viewer.dims.order = self._original_state["order"]
+            self.viewer.dims.ndisplay = self._original_state["ndisplay"]
+            for axis, point in enumerate(self._original_state["point"]):
+                self.viewer.dims.set_point(axis, point)
+            self.viewer.camera.angles = self._original_state["angles"]
+            self.viewer.camera.center = self._original_state["center"]
+            self.viewer.camera.zoom = self._original_state["zoom"]
+        finally:
+            self._is_exporting = False
+            self._frames = []
 
 
 def _get_voxel_scale(loader: TCFFileLoader) -> tuple[float, float, float]:
-    """Extract voxel scale from TCF metadata. Returns (z, y, x) in µm."""
-    try:
-        # Use registration params which contain the actual HT resolution
-        if hasattr(loader, 'reg_params') and loader.reg_params is not None:
-            params = loader.reg_params
-            return (
-                float(params.ht_res_z),
-                float(params.ht_res_y),
-                float(params.ht_res_x)
-            )
-    except Exception:
-        pass
-    # Fallback to Tomocube HT-2H defaults (from constants.py)
-    from tomocube.core.constants import DEFAULT_HT_RES_X, DEFAULT_HT_RES_Y, DEFAULT_HT_RES_Z
-    return (DEFAULT_HT_RES_Z, DEFAULT_HT_RES_Y, DEFAULT_HT_RES_X)
+    """Measured HT spacing in ZYX micrometers; invalid calibration is an error."""
+    params = loader.reg_params
+    scale = (float(params.ht_res_z), float(params.ht_res_y), float(params.ht_res_x))
+    if not np.isfinite(scale).all() or min(scale) <= 0:
+        raise ValueError("HT resolutions must be finite and positive")
+    return scale
+
+
+def _display_sample(data: np.ndarray) -> np.ndarray:
+    """Bound display-only statistics to one million deterministic sample values."""
+    step = max(1, (data.size + 999_999) // 1_000_000)
+    # flat slicing bounds allocation even when a native array is non-contiguous.
+    return data.flat[::step]
+
+
+def _display_limits(data, percentiles=(1, 99), *, positive=False):
+    sample = _display_sample(data)
+    if positive:
+        sample = sample[sample > 0]
+    if sample.size == 0:
+        return (0.0, 1.0)
+    low, high = (float(value) for value in np.percentile(sample, percentiles))
+    if low == high:
+        padding = max(abs(low) * 1e-4, 1e-6)
+        low, high = low - padding, high + padding
+    return low, high
 
 
 def _create_layer_controls(viewer):
@@ -349,7 +221,7 @@ def _create_layer_controls(viewer):
         def __init__(self, layer, parent=None):
             super().__init__(parent)
             self.layer = layer
-            self.original_data = layer.data.copy() if hasattr(layer, 'data') else None
+            self.original_data = layer.data
             self.original_contrast = layer.contrast_limits if hasattr(layer, 'contrast_limits') else None
             self.original_colormap = str(layer.colormap.name) if hasattr(layer, 'colormap') else "gray"
             self.original_opacity = layer.opacity
@@ -448,16 +320,17 @@ def _create_layer_controls(viewer):
                     self.layer.contrast_limits = self.original_contrast
                 else:
                     data = self.original_data
-                    low = np.percentile(data, value)
+                    low = float(np.percentile(_display_sample(data), value))
                     high = self.original_contrast[1]
-                    self.layer.contrast_limits = (low, high)
+                    if low < high:
+                        self.layer.contrast_limits = (low, high)
         
         def auto_contrast(self):
             """Apply auto contrast based on data percentiles."""
             if hasattr(self.layer, 'data') and hasattr(self.layer, 'contrast_limits'):
                 data = self.layer.data
                 if data.size > 0:
-                    p1, p99 = np.percentile(data, [1, 99])
+                    p1, p99 = _display_limits(data)
                     self.layer.contrast_limits = (p1, p99)
                     self.original_contrast = (p1, p99)
         
@@ -700,9 +573,7 @@ def _create_histogram_widget(viewer):
                 return
             
             # Flatten and sample for performance (max 1M points)
-            flat = data.ravel()
-            if len(flat) > 1_000_000:
-                flat = np.random.choice(flat, 1_000_000, replace=False)
+            flat = _display_sample(data)
             
             # Calculate stats
             d_min, d_max = float(np.min(data)), float(np.max(data))
@@ -766,7 +637,7 @@ def _create_histogram_widget(viewer):
                 return
             
             data = self.current_layer.data
-            low, high = np.percentile(data, [low_pct, high_pct])
+            low, high = _display_limits(data, (low_pct, high_pct))
             self.current_layer.contrast_limits = (low, high)
             self._update_histogram()
         
@@ -825,7 +696,7 @@ def _create_camera_controls(viewer):
                 btn = QPushButton(f"{name} [{key}]")
                 btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
                 btn.setToolTip(f"View from {name.lower()} (press {key})")
-                btn.clicked.connect(lambda checked, a=angles: self._set_view_animated(a))
+                btn.clicked.connect(lambda checked, a=angles: self._set_view(a))
                 grid.addWidget(btn, i // 3, i % 3)
 
             layout.addLayout(grid)
@@ -836,7 +707,7 @@ def _create_camera_controls(viewer):
             iso_btn = QPushButton("Isometric [0]")
             iso_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
             iso_btn.setToolTip("45-degree isometric view (press 0)")
-            iso_btn.clicked.connect(lambda: self._set_view_animated((0, -30, 45)))
+            iso_btn.clicked.connect(lambda: self._set_view((0, -30, 45)))
             iso_row.addWidget(iso_btn)
 
             reset_btn = QPushButton("Reset [R]")
@@ -882,11 +753,11 @@ def _create_camera_controls(viewer):
             # Camera presets 1-6
             for name, angles, key in CAMERA_PRESETS:
                 shortcut = QShortcut(QKeySequence(key), window)
-                shortcut.activated.connect(lambda a=angles: self._set_view_animated(a))
+                shortcut.activated.connect(lambda a=angles: self._set_view(a))
 
             # Isometric (0)
             iso_shortcut = QShortcut(QKeySequence("0"), window)
-            iso_shortcut.activated.connect(lambda: self._set_view_animated((0, -30, 45)))
+            iso_shortcut.activated.connect(lambda: self._set_view((0, -30, 45)))
 
             # Reset (R)
             reset_shortcut = QShortcut(QKeySequence("R"), window)
@@ -905,27 +776,6 @@ def _create_camera_controls(viewer):
             zoom_out = QShortcut(QKeySequence("-"), window)
             zoom_out.activated.connect(lambda: self._zoom(0.8))
 
-        def _set_view_animated(self, target_angles, steps: int = 10):
-            """Animate camera transition to target angles."""
-            from qtpy.QtWidgets import QApplication
-
-            viewer.dims.ndisplay = 3
-
-            # Get current angles
-            current = viewer.camera.angles
-            target = target_angles
-
-            # Simple linear interpolation over steps
-            def lerp(a, b, t):
-                return a + (b - a) * t
-
-            for i in range(1, steps + 1):
-                t = i / steps
-                new_angles = tuple(lerp(current[j], target[j], t) for j in range(3))
-                viewer.camera.angles = new_angles
-                QApplication.processEvents()  # Process Qt events to update display
-                time.sleep(0.02)  # ~50fps animation
-
         def _set_view(self, angles):
             viewer.dims.ndisplay = 3
             viewer.camera.angles = angles
@@ -935,520 +785,110 @@ def _create_camera_controls(viewer):
 
         def _reset_camera(self):
             viewer.dims.ndisplay = 3
-            self._set_view_animated(self.default_angles)
+            self._set_view(self.default_angles)
             viewer.camera.zoom = self.default_zoom
-            viewer.camera.center = (0, 0, 0)
+            viewer.reset_view()
 
     widget = CameraWidget()
     dock = viewer.window.add_dock_widget(widget, name="Camera", area="left")
     return dock
 
 
-def _create_crop_widget(viewer, ht_data: np.ndarray, scale: tuple):
-    """Create a docked widget with XYZ range sliders for cropping."""
+def _create_crop_widget(viewer, geometry: VolumeGeometry):
+    """Clip a calibrated HT box in the renderer without copying or slicing data."""
     from superqt import QRangeSlider
-    from qtpy.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QSizePolicy
+    from qtpy.QtWidgets import QWidget, QVBoxLayout, QLabel, QPushButton
     from qtpy.QtCore import Qt
-    
-    class AxisRangeSlider(QWidget):
-        """Single range slider with two handles for one axis."""
-        def __init__(self, label: str, max_val: int, unit_scale: float, on_change, parent=None):
-            super().__init__(parent)
-            self.unit_scale = unit_scale
-            self.max_val = max_val
-            self.on_change = on_change
-            
-            layout = QVBoxLayout(self)
-            layout.setContentsMargins(0, 4, 0, 4)
-            layout.setSpacing(2)
-            
-            # Header with label and range display
-            header = QHBoxLayout()
-            self.axis_label = QLabel(f"<b>{label}</b>")
-            self.range_label = QLabel(f"0 - {max_val}")
-            self.range_label.setStyleSheet("font-family: monospace;")
-            header.addWidget(self.axis_label)
-            header.addStretch()
-            header.addWidget(self.range_label)
-            layout.addLayout(header)
-            
-            # Range slider (single slider with 2 handles)
-            self.slider = QRangeSlider(Qt.Horizontal)
-            self.slider.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-            self.slider.setRange(0, max_val)
-            self.slider.setValue((0, max_val))
-            self.slider.valueChanged.connect(self._on_changed)
-            layout.addWidget(self.slider)
-            
-            # Size in um
-            self.size_label = QLabel(f"{max_val * unit_scale:.1f} um")
-            self.size_label.setStyleSheet("color: #888; font-size: 10px;")
-            layout.addWidget(self.size_label)
-        
-        def _on_changed(self, value):
-            min_v, max_v = value
-            self.range_label.setText(f"{min_v} - {max_v}")
-            size = (max_v - min_v) * self.unit_scale
-            self.size_label.setText(f"{size:.1f} um")
-            self.on_change()  # Live update
-        
-        def get_range(self) -> tuple[int, int]:
-            return self.slider.value()
-        
-        def reset(self):
-            self.slider.setValue((0, self.max_val))
-    
+
     class CropWidget(QWidget):
         def __init__(self):
             super().__init__()
-            self.full_data = {}  # {layer_name: data}
-            self.layer_info = {}  # {layer_name: {'scale': tuple, 'translate': tuple, 'is_fl': bool}}
-            
             layout = QVBoxLayout(self)
-            layout.setSpacing(4)
-            layout.setContentsMargins(4, 4, 4, 4)
-            
-            # Title
-            title = QLabel("<b>Volume Crop</b>")
-            title.setStyleSheet("font-size: 12px;")
-            layout.addWidget(title)
-            
-            z, y, x = ht_data.shape
-            
-            # Store all layers with their original data, scale, and translate
-            for layer in viewer.layers:
-                if hasattr(layer, 'data') and isinstance(layer.data, np.ndarray) and layer.data.ndim == 3:
-                    self.full_data[layer.name] = layer.data.copy()
-                    self.layer_info[layer.name] = {
-                        'scale': tuple(layer.scale),
-                        'translate': tuple(layer.translate),
-                        'is_fl': layer.name != "RI"  # FL channels are anything that's not RI
-                    }
-            
-            # Create range sliders (based on HT/RI dimensions)
-            self.z_slider = AxisRangeSlider("Z (depth)", z - 1, scale[0], self._apply_crop)
-            self.y_slider = AxisRangeSlider("Y (height)", y - 1, scale[1], self._apply_crop)
-            self.x_slider = AxisRangeSlider("X (width)", x - 1, scale[2], self._apply_crop)
-            
-            layout.addWidget(self.z_slider)
-            layout.addWidget(self.y_slider)
-            layout.addWidget(self.x_slider)
-            
-            layout.addSpacing(8)
-            
-            # Reset button
-            self.reset_btn = QPushButton("Reset")
-            self.reset_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-            self.reset_btn.clicked.connect(self._reset)
-            layout.addWidget(self.reset_btn)
-            
+            description = QLabel(
+                "Crop the 3D rendering in HT coordinates. Slice mode shows full "
+                "planes. Source data and layer visibility are preserved."
+            )
+            description.setWordWrap(True)
+            layout.addWidget(description)
+            self.sliders = []
+            self.labels = []
+            for axis, name in enumerate(("Z (depth)", "Y (height)", "X (width)")):
+                label = QLabel()
+                self.labels.append(label)
+                layout.addWidget(label)
+                slider = QRangeSlider(Qt.Horizontal)
+                slider.setRange(0, geometry.ht_shape[axis] - 1)
+                slider.setValue(geometry.ranges[axis])
+                slider.setEnabled(geometry.ht_shape[axis] > 1)
+                slider.setAccessibleName(f"Crop {name}")
+                slider.setToolTip("Inclusive HT sample indices")
+                slider.valueChanged.connect(self._apply_crop)
+                self.sliders.append(slider)
+                layout.addWidget(slider)
+            reset = QPushButton("Reset crop")
+            reset.clicked.connect(self._reset)
+            layout.addWidget(reset)
             layout.addStretch()
-        
-        def _apply_crop(self):
-            """Called automatically when any slider changes."""
-            z_min, z_max = self.z_slider.get_range()
-            y_min, y_max = self.y_slider.get_range()
-            x_min, x_max = self.x_slider.get_range()
-            
-            # Calculate physical crop bounds in µm (from HT coordinates)
-            phys_z_min = z_min * scale[0]
-            phys_z_max = (z_max + 1) * scale[0]
-            phys_y_min = y_min * scale[1]
-            phys_y_max = (y_max + 1) * scale[1]
-            phys_x_min = x_min * scale[2]
-            phys_x_max = (x_max + 1) * scale[2]
-            
-            for layer in viewer.layers:
-                if layer.name not in self.full_data:
-                    continue
-                    
-                full = self.full_data[layer.name]
-                info = self.layer_info[layer.name]
-                layer_scale = info['scale']
-                orig_translate = info['translate']
-                
-                if not info['is_fl']:
-                    # HT/RI layer - direct pixel crop
-                    cropped = full[z_min:z_max+1, y_min:y_max+1, x_min:x_max+1]
-                    layer.data = cropped
-                    layer.translate = (phys_z_min, phys_y_min, phys_x_min)
-                else:
-                    # FL layer - convert physical bounds to FL pixel coordinates
-                    # Account for original translate offset
-                    fl_z, fl_y, fl_x = full.shape
-                    
-                    # FL physical bounds (with original translate)
-                    fl_phys_z_start = orig_translate[0]
-                    fl_phys_y_start = orig_translate[1]
-                    fl_phys_x_start = orig_translate[2]
-                    fl_phys_z_end = fl_phys_z_start + fl_z * layer_scale[0]
-                    fl_phys_y_end = fl_phys_y_start + fl_y * layer_scale[1]
-                    fl_phys_x_end = fl_phys_x_start + fl_x * layer_scale[2]
-                    
-                    # Find intersection of crop region with FL physical bounds
-                    crop_z_start = max(phys_z_min, fl_phys_z_start)
-                    crop_z_end = min(phys_z_max, fl_phys_z_end)
-                    crop_y_start = max(phys_y_min, fl_phys_y_start)
-                    crop_y_end = min(phys_y_max, fl_phys_y_end)
-                    crop_x_start = max(phys_x_min, fl_phys_x_start)
-                    crop_x_end = min(phys_x_max, fl_phys_x_end)
-                    
-                    # Check if there's any intersection
-                    if crop_z_end <= crop_z_start or crop_y_end <= crop_y_start or crop_x_end <= crop_x_start:
-                        # No intersection - hide layer with empty data
-                        layer.data = np.zeros((1, 1, 1), dtype=full.dtype)
-                        layer.visible = False
-                        continue
-                    
-                    layer.visible = True
-                    
-                    # Convert physical intersection to FL pixel coordinates
-                    fl_pix_z_min = int((crop_z_start - fl_phys_z_start) / layer_scale[0])
-                    fl_pix_z_max = int(np.ceil((crop_z_end - fl_phys_z_start) / layer_scale[0]))
-                    fl_pix_y_min = int((crop_y_start - fl_phys_y_start) / layer_scale[1])
-                    fl_pix_y_max = int(np.ceil((crop_y_end - fl_phys_y_start) / layer_scale[1]))
-                    fl_pix_x_min = int((crop_x_start - fl_phys_x_start) / layer_scale[2])
-                    fl_pix_x_max = int(np.ceil((crop_x_end - fl_phys_x_start) / layer_scale[2]))
-                    
-                    # Clamp to valid range
-                    fl_pix_z_min = max(0, min(fl_pix_z_min, fl_z))
-                    fl_pix_z_max = max(0, min(fl_pix_z_max, fl_z))
-                    fl_pix_y_min = max(0, min(fl_pix_y_min, fl_y))
-                    fl_pix_y_max = max(0, min(fl_pix_y_max, fl_y))
-                    fl_pix_x_min = max(0, min(fl_pix_x_min, fl_x))
-                    fl_pix_x_max = max(0, min(fl_pix_x_max, fl_x))
-                    
-                    cropped = full[fl_pix_z_min:fl_pix_z_max, fl_pix_y_min:fl_pix_y_max, fl_pix_x_min:fl_pix_x_max]
-                    layer.data = cropped
-                    # New translate: where the cropped FL starts in physical space
-                    layer.translate = (crop_z_start, crop_y_start, crop_x_start)
-        
-        def _reset(self):
-            # Block signals to prevent multiple updates
-            self.z_slider.slider.blockSignals(True)
-            self.y_slider.slider.blockSignals(True)
-            self.x_slider.slider.blockSignals(True)
-            
-            self.z_slider.reset()
-            self.y_slider.reset()
-            self.x_slider.reset()
-            
-            self.z_slider.slider.blockSignals(False)
-            self.y_slider.slider.blockSignals(False)
-            self.x_slider.slider.blockSignals(False)
-            
-            # Restore full data with original scale and translate
-            for layer in viewer.layers:
-                if layer.name in self.full_data:
-                    layer.data = self.full_data[layer.name].copy()
-                    layer.translate = self.layer_info[layer.name]['translate']
-                    layer.visible = True
-    
-    crop_widget = CropWidget()
-    dock = viewer.window.add_dock_widget(crop_widget, name="Crop", area="left")
-    return dock
+            self._update_labels()
+            # Clipping is a volume-rendering operation; avoid presenting it as
+            # an effective 2D crop while slice mode is active.
+            viewer.dims.events.ndisplay.connect(self._update_enabled)
+            self._update_enabled()
 
+        def _update_enabled(self, event=None):
+            for axis, slider in enumerate(self.sliders):
+                slider.setEnabled(viewer.dims.ndisplay == 3 and geometry.ht_shape[axis] > 1)
 
-def _create_clipping_widget(viewer, ht_data: np.ndarray, scale: tuple):
-    """Create clipping planes widget for volume sectioning with range sliders."""
-    from superqt import QRangeSlider
-    from qtpy.QtWidgets import (
-        QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-        QCheckBox, QSizePolicy, QGroupBox
-    )
-    from qtpy.QtCore import Qt
+        def _update_labels(self):
+            for axis, label in enumerate(self.labels):
+                start, stop = geometry.ranges[axis]
+                low = (start - 0.5) * geometry.ht_spacing[axis]
+                high = (stop + 0.5) * geometry.ht_spacing[axis]
+                label.setText(f"{'ZYX'[axis]}: {start}–{stop}  |  {low:.3g}–{high:.3g} µm")
 
-    class ClippingWidget(QWidget):
-        def __init__(self):
-            super().__init__()
-            self.full_data = {}
-            self.clip_enabled = {"x": False, "y": False, "z": False}
-            # Store ranges as (min, max) tuples
-            self.clip_ranges = {"x": (0, 0), "y": (0, 0), "z": (0, 0)}
-
-            # Only store HT layer (RI) - FL layers have different dimensions
-            for layer in viewer.layers:
-                if layer.name == "RI" and hasattr(layer, 'data') and isinstance(layer.data, np.ndarray):
-                    self.full_data[layer.name] = layer.data.copy()
-
-            z, y, x = ht_data.shape
-            # Store max values for initialization
-            self.max_vals = {"x": x - 1, "y": y - 1, "z": z - 1}
-            # Initialize ranges to full extent
-            self.clip_ranges = {"x": (0, x - 1), "y": (0, y - 1), "z": (0, z - 1)}
-
-            layout = QVBoxLayout(self)
-            layout.setSpacing(4)
-            layout.setContentsMargins(4, 4, 4, 4)
-
-            # Title
-            title = QLabel("<b>Clipping Planes</b>")
-            title.setStyleSheet("font-size: 13px;")
-            layout.addWidget(title)
-
-            desc = QLabel("Use range sliders to clip the volume on both sides of each axis.")
-            desc.setStyleSheet("color: #888; font-size: 10px;")
-            desc.setWordWrap(True)
-            layout.addWidget(desc)
-
-            # X clipping
-            x_group = QGroupBox("X Axis")
-            x_layout = QVBoxLayout(x_group)
-
-            x_header = QHBoxLayout()
-            self.x_enabled = QCheckBox("Enable")
-            self.x_enabled.toggled.connect(lambda v: self._toggle_clip("x", v))
-            x_header.addWidget(self.x_enabled)
-            x_header.addStretch()
-            self.x_label = QLabel(f"0 - {x-1}")
-            self.x_label.setStyleSheet("font-family: monospace;")
-            x_header.addWidget(self.x_label)
-            x_layout.addLayout(x_header)
-
-            self.x_slider = QRangeSlider(Qt.Horizontal)
-            self.x_slider.setRange(0, x - 1)
-            self.x_slider.setValue((0, x - 1))
-            self.x_slider.valueChanged.connect(lambda v: self._on_range_change("x", v))
-            x_layout.addWidget(self.x_slider)
-            layout.addWidget(x_group)
-
-            # Y clipping
-            y_group = QGroupBox("Y Axis")
-            y_layout = QVBoxLayout(y_group)
-
-            y_header = QHBoxLayout()
-            self.y_enabled = QCheckBox("Enable")
-            self.y_enabled.toggled.connect(lambda v: self._toggle_clip("y", v))
-            y_header.addWidget(self.y_enabled)
-            y_header.addStretch()
-            self.y_label = QLabel(f"0 - {y-1}")
-            self.y_label.setStyleSheet("font-family: monospace;")
-            y_header.addWidget(self.y_label)
-            y_layout.addLayout(y_header)
-
-            self.y_slider = QRangeSlider(Qt.Horizontal)
-            self.y_slider.setRange(0, y - 1)
-            self.y_slider.setValue((0, y - 1))
-            self.y_slider.valueChanged.connect(lambda v: self._on_range_change("y", v))
-            y_layout.addWidget(self.y_slider)
-            layout.addWidget(y_group)
-
-            # Z clipping
-            z_group = QGroupBox("Z Axis (Depth)")
-            z_layout = QVBoxLayout(z_group)
-
-            z_header = QHBoxLayout()
-            self.z_enabled = QCheckBox("Enable")
-            self.z_enabled.toggled.connect(lambda v: self._toggle_clip("z", v))
-            z_header.addWidget(self.z_enabled)
-            z_header.addStretch()
-            self.z_label = QLabel(f"0 - {z-1}")
-            self.z_label.setStyleSheet("font-family: monospace;")
-            z_header.addWidget(self.z_label)
-            z_layout.addLayout(z_header)
-
-            self.z_slider = QRangeSlider(Qt.Horizontal)
-            self.z_slider.setRange(0, z - 1)
-            self.z_slider.setValue((0, z - 1))
-            self.z_slider.valueChanged.connect(lambda v: self._on_range_change("z", v))
-            z_layout.addWidget(self.z_slider)
-            layout.addWidget(z_group)
-
-            # Reset button
-            reset_btn = QPushButton("Reset All")
-            reset_btn.clicked.connect(self._reset)
-            layout.addWidget(reset_btn)
-
-            layout.addStretch()
-
-        def _toggle_clip(self, axis: str, enabled: bool):
-            self.clip_enabled[axis] = enabled
-            self._apply_clipping()
-
-        def _on_range_change(self, axis: str, value: tuple):
-            min_v, max_v = value
-            self.clip_ranges[axis] = (min_v, max_v)
-            label = getattr(self, f"{axis}_label")
-            label.setText(f"{min_v} - {max_v}")
-            if self.clip_enabled[axis]:
-                self._apply_clipping()
-
-        def _apply_clipping(self):
-            """Apply clipping by masking data with NaN outside the range."""
-            for layer in viewer.layers:
-                if layer.name not in self.full_data:
-                    continue
-
-                full = self.full_data[layer.name].copy()
-                z, y, x = full.shape
-
-                # Apply each enabled clip - mask values OUTSIDE the range
-                if self.clip_enabled["x"]:
-                    x_min, x_max = self.clip_ranges["x"]
-                    full[:, :, :x_min] = np.nan
-                    full[:, :, x_max + 1:] = np.nan
-
-                if self.clip_enabled["y"]:
-                    y_min, y_max = self.clip_ranges["y"]
-                    full[:, :y_min, :] = np.nan
-                    full[:, y_max + 1:, :] = np.nan
-
-                if self.clip_enabled["z"]:
-                    z_min, z_max = self.clip_ranges["z"]
-                    full[:z_min, :, :] = np.nan
-                    full[z_max + 1:, :, :] = np.nan
-
-                layer.data = full
+        def _apply_crop(self, value=None):
+            geometry.set_crop(tuple(slider.value() for slider in self.sliders))
+            self._update_labels()
 
         def _reset(self):
-            """Reset all clipping."""
-            # Block signals during reset
-            self.x_slider.blockSignals(True)
-            self.y_slider.blockSignals(True)
-            self.z_slider.blockSignals(True)
+            for axis, slider in enumerate(self.sliders):
+                slider.blockSignals(True)
+                slider.setValue((0, geometry.ht_shape[axis] - 1))
+                slider.blockSignals(False)
+            self._apply_crop()
 
-            self.x_enabled.setChecked(False)
-            self.y_enabled.setChecked(False)
-            self.z_enabled.setChecked(False)
-
-            # Reset sliders to full range
-            self.x_slider.setValue((0, self.max_vals["x"]))
-            self.y_slider.setValue((0, self.max_vals["y"]))
-            self.z_slider.setValue((0, self.max_vals["z"]))
-
-            # Reset labels
-            self.x_label.setText(f"0 - {self.max_vals['x']}")
-            self.y_label.setText(f"0 - {self.max_vals['y']}")
-            self.z_label.setText(f"0 - {self.max_vals['z']}")
-
-            # Reset ranges
-            self.clip_ranges = {
-                "x": (0, self.max_vals["x"]),
-                "y": (0, self.max_vals["y"]),
-                "z": (0, self.max_vals["z"]),
-            }
-
-            self.x_slider.blockSignals(False)
-            self.y_slider.blockSignals(False)
-            self.z_slider.blockSignals(False)
-
-            # Restore full data
-            for layer in viewer.layers:
-                if layer.name in self.full_data:
-                    layer.data = self.full_data[layer.name].copy()
-
-    widget = ClippingWidget()
-    viewer.window.add_dock_widget(widget, name="Clipping", area="left")
-    return widget
+    return viewer.window.add_dock_widget(CropWidget(), name="Crop", area="left")
 
 
-def _create_fl_z_offset_widget(viewer, loader, ht_data: np.ndarray, scale: tuple, initial_mode: str, crop_widget=None):
-    """Create widget for adjusting FL Z offset interactively.
-    
-    Uses napari's translate parameter instead of resampling data.
-    """
-    from qtpy.QtWidgets import (
-        QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-        QSlider, QComboBox, QSizePolicy
-    )
-    from qtpy.QtCore import Qt
+def _create_fl_z_offset_widget(viewer, geometry: VolumeGeometry):
+    """Adjust fluorescence in HT-world Z while retaining its affine and crop."""
+    from qtpy.QtWidgets import QWidget, QVBoxLayout, QLabel, QPushButton, QDoubleSpinBox
 
     class FLZOffsetWidget(QWidget):
         def __init__(self):
             super().__init__()
-            self.fl_layers = {}
-            self.current_offset_um = 0.0
-
-            # Get registration params
-            self.reg_params = loader.reg_params
-            self.ht_z_total = ht_data.shape[0] * self.reg_params.ht_res_z
-
-            # Find FL layers
-            for ch_name in loader.fl_data.keys():
-                for layer in viewer.layers:
-                    if layer.name == ch_name:
-                        self.fl_layers[ch_name] = layer
-                        # Store initial translate
-                        layer._initial_translate = layer.translate
-                        break
-
-            if not self.fl_layers:
-                layout = QVBoxLayout(self)
-                layout.addWidget(QLabel("No fluorescence data available"))
-                layout.addStretch()
-                return
-
             layout = QVBoxLayout(self)
-            layout.setSpacing(4)
-            layout.setContentsMargins(4, 4, 4, 4)
-
-            # Title
-            title = QLabel("<b>FL Z Offset</b>")
-            title.setStyleSheet("font-size: 12px;")
-            layout.addWidget(title)
-
-            # Offset slider
-            offset_row = QHBoxLayout()
-            offset_lbl = QLabel("Z Offset:")
-            offset_lbl.setFixedWidth(60)
-            offset_row.addWidget(offset_lbl)
-            self.offset_label = QLabel("0.0 µm")
-            self.offset_label.setStyleSheet("font-family: monospace; font-weight: bold;")
-            self.offset_label.setFixedWidth(80)
-            offset_row.addWidget(self.offset_label)
-            layout.addLayout(offset_row)
-
-            # Slider (range: full HT Z extent in both directions)
-            self.offset_range = self.ht_z_total
-            self.offset_slider = QSlider(Qt.Horizontal)
-            self.offset_slider.setRange(-1000, 1000)  # -100.0% to +100.0%
-            self.offset_slider.setValue(0)
-            self.offset_slider.valueChanged.connect(self._on_slider_change)
-            layout.addWidget(self.offset_slider)
-
-            # Range info
-            range_label = QLabel(f"Range: ±{self.offset_range:.1f} µm")
-            range_label.setStyleSheet("color: #888; font-size: 10px;")
-            layout.addWidget(range_label)
-
-            layout.addSpacing(8)
-
-            # Reset button
-            reset_btn = QPushButton("Reset")
-            reset_btn.clicked.connect(self._reset)
-            layout.addWidget(reset_btn)
-
+            description = QLabel(
+                "Additional FL shift in HT Z (µm). Positive values move toward "
+                "larger HT Z. This display adjustment does not change saved registration."
+            )
+            description.setWordWrap(True)
+            layout.addWidget(description)
+            self.offset = QDoubleSpinBox()
+            extent = geometry.ht_shape[0] * geometry.ht_spacing[0]
+            self.offset.setRange(-extent, extent)
+            self.offset.setDecimals(4)
+            self.offset.setSingleStep(float(geometry.ht_spacing[0]))
+            self.offset.setSuffix(" µm")
+            self.offset.setAccessibleName("Additional fluorescence Z offset")
+            self.offset.valueChanged.connect(geometry.set_fl_z_offset)
+            layout.addWidget(self.offset)
+            reset = QPushButton("Reset FL shift")
+            reset.clicked.connect(lambda: self.offset.setValue(0))
+            layout.addWidget(reset)
             layout.addStretch()
 
-        def _on_slider_change(self, value: int):
-            # Convert slider value to µm offset
-            self.current_offset_um = (value / 1000.0) * self.offset_range
-            self.offset_label.setText(f"{self.current_offset_um:+.1f} µm")
-            self._apply_offset()
-
-        def _apply_offset(self):
-            """Update FL layer translate to apply Z offset."""
-            for ch_name, layer in self.fl_layers.items():
-                initial = layer._initial_translate
-                # Only modify Z (first component)
-                new_translate = (
-                    initial[0] + self.current_offset_um,
-                    initial[1],
-                    initial[2]
-                )
-                layer.translate = new_translate
-
-        def _reset(self):
-            """Reset to initial position."""
-            self.current_offset_um = 0.0
-            self.offset_slider.setValue(0)
-            self.offset_label.setText("0.0 µm")
-            for ch_name, layer in self.fl_layers.items():
-                layer.translate = layer._initial_translate
-
-    widget = FLZOffsetWidget()
-    dock = viewer.window.add_dock_widget(widget, name="FL Z", area="right")
-    return dock
+    return viewer.window.add_dock_widget(FLZOffsetWidget(), name="FL Z", area="right")
 
 
 def _create_animation_widget(viewer, output_dir: Path):
@@ -1575,13 +1015,17 @@ def _create_animation_widget(viewer, output_dir: Path):
             self._set_buttons_enabled(False)
 
             # Initialize export
-            self.exporter.start_turntable_export(
-                filename, self.frames_spin.value(), self._get_duration_ms()
-            )
+            try:
+                self.exporter.start_turntable_export(
+                    filename, self.frames_spin.value(), self._get_duration_ms()
+                )
+            except Exception as exc:
+                self._on_error(str(exc))
+                return
             self._export_mode = "turntable"
 
             # Use QTimer to capture frames on main thread
-            self._export_timer = QTimer()
+            self._export_timer = QTimer(self)
             self._export_timer.timeout.connect(self._capture_frame)
             self._export_timer.start(50)  # Capture at ~20fps
 
@@ -1601,14 +1045,18 @@ def _create_animation_widget(viewer, output_dir: Path):
             self._set_buttons_enabled(False)
 
             # Initialize export - use shared speed control
-            n_slices = self.exporter.start_slice_sweep_export(
-                filename, self.axis_combo.currentIndex(), self._get_duration_ms()
-            )
+            try:
+                n_slices = self.exporter.start_slice_sweep_export(
+                    filename, self.axis_combo.currentIndex(), self._get_duration_ms()
+                )
+            except Exception as exc:
+                self._on_error(str(exc))
+                return
             self.progress.setMaximum(n_slices)
             self._export_mode = "sweep"
 
             # Use QTimer to capture frames on main thread
-            self._export_timer = QTimer()
+            self._export_timer = QTimer(self)
             self._export_timer.timeout.connect(self._capture_frame)
             self._export_timer.start(30)  # Faster for slice sweeps
 
@@ -1641,6 +1089,7 @@ def _create_animation_widget(viewer, output_dir: Path):
             self._set_buttons_enabled(True)
 
         def _on_error(self, msg: str):
+            self.exporter.cancel_export()
             self.progress.setVisible(False)
             self.status.setText(f"Error: {msg}")
             self._set_buttons_enabled(True)
@@ -1651,209 +1100,168 @@ def _create_animation_widget(viewer, output_dir: Path):
             self.sweep_gif_btn.setEnabled(enabled)
             self.sweep_mp4_btn.setEnabled(enabled)
 
+        def stop_export(self):
+            if self._export_timer is not None:
+                self._export_timer.stop()
+            self.exporter.cancel_export()
+
+        def closeEvent(self, event):
+            self.stop_export()
+            super().closeEvent(event)
+
     widget = AnimationWidget()
     dock = viewer.window.add_dock_widget(widget, name="Animation", area="right")
     return dock
+
+
+def _add_volume_layers(viewer, ht_data, scale, registrations, rendering, metadata):
+    """Attach native arrays with complete shared affines, never resampling FL."""
+    geometry = VolumeGeometry(ht_data.shape, scale)
+    ht_affine = np.diag((*scale, 1.0))
+    ht_layer = viewer.add_image(
+        ht_data, name="RI", rgb=False, colormap="gray",
+        contrast_limits=_display_limits(ht_data), affine=ht_affine,
+        blending="translucent", opacity=0.9, rendering=rendering,
+        interpolation2d="linear", interpolation3d="linear", metadata=dict(metadata),
+    )
+    geometry.add_layer(ht_layer, ht_affine)
+    if rendering == "attenuated_mip":
+        ht_layer.attenuation = 0.5
+    colormaps = ("green", "magenta", "cyan", "yellow", "red", "blue")
+    for index, (channel, registration) in enumerate(registrations.items()):
+        affine = registration.voxel_to_world
+        layer = viewer.add_image(
+            registration.data, name=channel, rgb=False,
+            colormap=colormaps[index % len(colormaps)],
+            contrast_limits=_display_limits(registration.data, (5, 99.5), positive=True),
+            affine=affine, blending="additive", opacity=0.8, rendering=rendering,
+            interpolation2d="linear", interpolation3d="linear",
+            metadata={**metadata, "channel": channel,
+                      "voxel_to_world_um": affine.tolist()},
+        )
+        geometry.add_layer(layer, affine, fluorescence=True)
+    return geometry
 
 
 def view_3d(
     tcf_path: str | Path,
     show_slices: bool = False,
     rendering: str = "mip",
-    screenshot: str | None = None,
-    enable_downsampling: bool = True,
+    screenshot: str | Path | None = None,
     z_offset_mode: str = "auto",
+    *,
+    timepoint: int = 0,
+    fl_channel: str | None = None,
+    registration_path: str | Path | None = None,
 ) -> None:
-    """
-    Open interactive 3D viewer for a TCF file.
+    """Open one acquisition with calibrated native HT/FL layers in napari.
 
-    Args:
-        tcf_path: Path to TCF file
-        show_slices: Start in 2D slice mode (default: 3D volume)
-        rendering: Volume rendering - "mip", "attenuated_mip", "minip", "average"
-        screenshot: Path to save screenshot
-        enable_downsampling: Auto-downsample during interaction for large volumes
-        z_offset_mode: FL Z alignment mode - "auto", "start", or "center"
+    None for fl_channel shows every available channel; an explicit name selects
+    only that channel. Saved alignment requires an explicit channel and supplies
+    its base Z mode and residual translation. Manual shifts are display-only.
+    Input selection and registration are validated before GUI creation.
     """
-    try:
-        import napari
-    except ImportError:
-        raise ImportError(
-            "napari is required for 3D viewing. Install with:\n"
-            "  pip install 'tomocube-tools[3d]'"
-        )
+    if isinstance(timepoint, (bool, np.bool_)) or not isinstance(timepoint, (int, np.integer)) or timepoint < 0:
+        raise ValueError("timepoint must be a non-negative integer")
+    if rendering not in ("mip", "attenuated_mip", "minip", "average"):
+        raise ValueError("rendering must be mip, attenuated_mip, minip or average")
+    if z_offset_mode not in Z_OFFSET_MODES:
+        raise ValueError(f"z_offset_mode must be one of {Z_OFFSET_MODES}")
+    if fl_channel is not None and (not isinstance(fl_channel, str) or not fl_channel.strip()):
+        raise ValueError("fl_channel must be a non-empty channel name")
+    if registration_path is not None and fl_channel is None:
+        raise ValueError("registration_path requires an explicit fl_channel")
 
     from tomocube.core.file import TCFFileLoader
 
     tcf_path = Path(tcf_path)
-
-    with TCFFileLoader(str(tcf_path)) as loader:
-        loader.load_timepoint(0)
-
-        ht_data = loader.data_3d.copy()
+    with TCFFileLoader(tcf_path) as loader:
+        loader.load_timepoint(timepoint)
+        ht_data = loader.data_3d
+        if not np.isfinite(ht_data).all():
+            raise ValueError("HT volume must contain finite intensities")
         scale = _get_voxel_scale(loader)
-        title = f"TCF 3D: {tcf_path.stem}"
+        if fl_channel is not None and fl_channel not in loader.fl_data:
+            raise ValueError(f"Fluorescence channel {fl_channel!r} is unavailable at timepoint {timepoint}")
+        channels = [fl_channel] if fl_channel is not None else list(loader.fl_data)
+        translation_um = (0.0, 0.0, 0.0)
+        if registration_path is not None:
+            from tomocube.processing.alignment import load_alignment
+            alignment = load_alignment(registration_path, loader, fl_channel)
+            z_offset_mode = alignment.z_offset_mode
+            translation_um = alignment.translation_um
+        registrations = {
+            channel: FluorescenceRegistration(
+                loader.fl_data[channel], ht_data.shape, loader.reg_params,
+                channel=channel, z_offset_mode=z_offset_mode,
+                translation_um=translation_um,
+            )
+            for channel in channels
+        }
+        metadata = {"source": str(tcf_path.resolve()), "timepoint": loader.current_timepoint,
+                    "z_offset_mode": z_offset_mode}
+        if registration_path is not None:
+            metadata["registration_path"] = str(Path(registration_path).resolve())
+        acquisition = loader.current_timepoint
+    # All native arrays are now resident. Release the source HDF5 file before
+    # entering the GUI, including when optional imports or window setup fail.
+    try:
+        import napari
+    except ImportError as exc:
+        raise ImportError(
+            "napari is required for 3D viewing. Install with:\n"
+            "  pip install 'tomocube-tools[3d]'"
+        ) from exc
 
-        # Track all layer data for downsampling
-        layers_data = {}
-
-        # Create viewer
-        viewer = napari.Viewer(title=title)
-
-        # Contrast limits
-        p1, p99 = np.percentile(ht_data, [1, 99])
-
-        # Add HT volume
-        ht_layer = viewer.add_image(
-            ht_data,
-            name="RI",
-            colormap="gray",
-            contrast_limits=(p1, p99),
-            scale=scale,
-            blending="translucent",
-            opacity=0.9,
-            rendering=rendering,
-        )
-        layers_data["RI"] = ht_data
-
-        if rendering == "attenuated_mip":
-            ht_layer.attenuation = 0.5
-
-        # Add FL channels using napari's native coordinate system
-        # FL and HT cover the same physical XY area (e.g., 230×230 µm) at different resolutions
-        # We use napari's scale/translate to overlay them without resampling
-        if loader.has_fluorescence:
-            colormaps = ["green", "magenta", "cyan", "yellow", "red", "blue"]
-
-            rp = loader.reg_params
-            ht_z, ht_y, ht_x = ht_data.shape
-
-            # FL scale uses its own resolution (different from HT)
-            fl_scale = (rp.fl_res_z, rp.fl_res_y, rp.fl_res_x)
-
-            # Calculate physical FOV to verify alignment
-            ht_fov_x = ht_x * rp.ht_res_x
-            ht_fov_y = ht_y * rp.ht_res_y
-            ht_fov_z = ht_z * rp.ht_res_z
-
-            vprint(f"\n{'='*60}")
-            vprint(f"FL Overlay (native resolution, no resampling)")
-            vprint(f"{'='*60}")
-            vprint(f"  HT: {ht_x}×{ht_y}×{ht_z} px @ {rp.ht_res_x:.4f} µm/px = {ht_fov_x:.1f}×{ht_fov_y:.1f}×{ht_fov_z:.1f} µm")
-
-            for idx, (ch_name, fl_data) in enumerate(loader.fl_data.items()):
-                fl_z, fl_y, fl_x = fl_data.shape
-                fl_fov_x = fl_x * rp.fl_res_x
-                fl_fov_y = fl_y * rp.fl_res_y
-                fl_fov_z = fl_z * rp.fl_res_z
-
-                vprint(f"  {ch_name}: {fl_x}×{fl_y}×{fl_z} px @ {rp.fl_res_x:.4f} µm/px = {fl_fov_x:.1f}×{fl_fov_y:.1f}×{fl_fov_z:.1f} µm")
-
-                # Get Z offset from file (physical µm offset)
-                ch_offset_z = rp.get_offset_z(ch_name)
-
-                # Determine Z translation based on mode
-                if z_offset_mode == "auto":
-                    # Center FL on HT volume
-                    z_translate = (ht_fov_z - fl_fov_z) / 2
-                    vprint(f"    Z: centered at {z_translate:.1f} µm (auto)")
-                elif z_offset_mode == "center":
-                    # OffsetZ is center of FL in HT space
-                    z_translate = ch_offset_z - fl_fov_z / 2
-                    vprint(f"    Z: center at {ch_offset_z:.1f} µm => translate {z_translate:.1f} µm")
-                else:  # "start"
-                    # OffsetZ is where FL starts in HT space
-                    z_translate = ch_offset_z
-                    vprint(f"    Z: starts at {ch_offset_z:.1f} µm")
-
-                # XY centering: both FOVs should match, but center anyway
-                # (handles any small FOV differences)
-                y_translate = (ht_fov_y - fl_fov_y) / 2
-                x_translate = (ht_fov_x - fl_fov_x) / 2
-
-                fl_translate = (z_translate, y_translate, x_translate)
-
-                fl_nonzero = fl_data[fl_data > 0]
-                if len(fl_nonzero) > 0:
-                    fl_p1, fl_p99 = np.percentile(fl_nonzero, [5, 99.5])
-                else:
-                    fl_p1, fl_p99 = 0, 1
-
-                fl_copy = fl_data.astype(np.float32).copy()
-                viewer.add_image(
-                    fl_copy,
-                    name=ch_name,
-                    colormap=colormaps[idx % len(colormaps)],
-                    contrast_limits=(fl_p1, fl_p99),
-                    scale=fl_scale,
-                    translate=fl_translate,
-                    blending="additive",
-                    opacity=0.8,
-                    rendering=rendering,
-                )
-                layers_data[ch_name] = fl_copy
-
-            print(f"{'='*60}\n", flush=True)
-
-        # Scale bar
+    viewer = napari.Viewer(title=f"TCF 3D: {tcf_path.stem} | acquisition {acquisition}")
+    animation_widget = None
+    try:
+        geometry = _add_volume_layers(viewer, ht_data, scale, registrations, rendering, metadata)
+        constrain_native_slicing(viewer)
         viewer.scale_bar.visible = True
         viewer.scale_bar.unit = "µm"
         viewer.scale_bar.font_size = 14
+        viewer.dims.axis_labels = ("Z (µm)", "Y (µm)", "X (µm)")
 
-        # Hide napari's built-in layer list - we have our own
         viewer.window._qt_viewer.dockLayerList.setVisible(False)
         viewer.window._qt_viewer.dockLayerControls.setVisible(False)
-
-        # Add control widgets and tabify them for cleaner UI
-        # Left side: Camera and Crop in tabs
-        camera_dock = _create_camera_controls(viewer)  # left
-        crop_dock = _create_crop_widget(viewer, ht_data, scale)  # left
-        
-        # Right side: Layers, Histogram, FL, Animation in tabs
-        layers_dock = _create_layer_controls(viewer)  # right
-        histogram_dock = _create_histogram_widget(viewer)  # right
-        fl_dock = None
-        if loader.has_fluorescence:
-            fl_dock = _create_fl_z_offset_widget(viewer, loader, ht_data, scale, z_offset_mode, crop_dock)  # right
-        animation_dock = _create_animation_widget(viewer, tcf_path.parent)  # right
-        
-        # Tabify widgets: group related controls into tabs
-        # Left side: Camera + Crop
+        camera_dock = _create_camera_controls(viewer)
+        crop_dock = _create_crop_widget(viewer, geometry)
+        layers_dock = _create_layer_controls(viewer)
+        histogram_dock = _create_histogram_widget(viewer)
+        fl_dock = _create_fl_z_offset_widget(viewer, geometry) if registrations else None
+        animation_dock = _create_animation_widget(viewer, tcf_path.parent)
+        animation_widget = animation_dock.widget()
         main_window = viewer.window._qt_window
         main_window.tabifyDockWidget(camera_dock, crop_dock)
-        camera_dock.raise_()  # Show Camera tab by default
-        
-        # Right side: Layers + Histogram + FL + Animation
-        main_window.tabifyDockWidget(layers_dock, histogram_dock)
+        camera_dock.raise_()
+        docks = [layers_dock, histogram_dock]
         if fl_dock is not None:
-            main_window.tabifyDockWidget(histogram_dock, fl_dock)
-            main_window.tabifyDockWidget(fl_dock, animation_dock)
-        else:
-            main_window.tabifyDockWidget(histogram_dock, animation_dock)
-        layers_dock.raise_()  # Show Layers tab by default
+            docks.append(fl_dock)
+        docks.append(animation_dock)
+        for previous, current in zip(docks, docks[1:]):
+            main_window.tabifyDockWidget(previous, current)
+        layers_dock.raise_()
 
-        # Set view mode
+        viewer.dims.ndisplay = 2 if show_slices else 3
         if show_slices:
-            viewer.dims.ndisplay = 2
-            viewer.dims.set_point(0, ht_data.shape[0] // 2)
+            viewer.dims.set_point(0, (ht_data.shape[0] - 1) * scale[0] / 2)
         else:
-            viewer.dims.ndisplay = 3
             viewer.camera.angles = (0, -30, 45)
-            viewer.camera.zoom = 0.8
-
-        # Print info
-        z, y, x = ht_data.shape
-        volume_size = ht_data.size
-        print(f"\nVolume: {x} x {y} x {z} voxels ({volume_size / 1e6:.1f}M voxels)")
-        print(f"Physical size: {x*scale[2]:.1f} x {y*scale[1]:.1f} x {z*scale[0]:.1f} µm")
-        print(f"\nKeyboard shortcuts:")
-        print(f"  1-6: Camera presets (Top/Bottom/Front/Back/Left/Right)")
-        print(f"  0: Isometric view  |  R: Reset  |  F: Fit")
-        print(f"  +/-: Zoom  |  2/3: Toggle slice/3D view", flush=True)
-
-        if screenshot:
-            time.sleep(0.5)
-            viewer.screenshot(screenshot)
-            print(f"\n  Screenshot saved: {screenshot}")
-
+            viewer.reset_view()
+        if screenshot is not None:
+            from qtpy.QtWidgets import QApplication
+            QApplication.processEvents()
+            from tomocube.processing.outputs import atomic_output
+            sources = [tcf_path]
+            if registration_path is not None:
+                sources.append(registration_path)
+            with atomic_output(screenshot, sources=sources) as temporary:
+                viewer.screenshot(str(temporary))
         napari.run()
+    finally:
+        try:
+            if animation_widget is not None:
+                animation_widget.stop_export()
+        finally:
+            viewer.close()
